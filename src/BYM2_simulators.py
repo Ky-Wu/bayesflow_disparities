@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Feb 28 20:26:54 2026
+
+@author: 
+"""
+
+import numpy as np
+
+def CAR_prior(A, rng):
+    # A: 2D square matrix where Q^{-1} = AA^{\T}
+    # rng: output from np.random.default_rng(seed = seed)
+    if A.shape[0] != A.shape[1]:
+        raise AttributeError("RInv must be square")
+    x = rng.normal(size = A.shape[0])
+    x = A @ x
+    return x
+
+def rho_KLD(rho, Lambda):
+    # rho: spatial proportion of variance in BYM2 model
+    # Lambda: 1D numpy array of eigenvalues of spatial precision matrix
+    n = Lambda.size
+    kld = -n * rho / 2.0
+    kld += np.sum(rho / Lambda) / 2.0
+    kld -= np.sum(np.log(rho / Lambda + (1 - rho)))
+    return kld
+    
+
+def PC_prior(lambda_rho, Lambda, rng):
+    #rng = np.random.default_rng(seed = seed)
+    accept = False
+    rho_star = rng.uniform(size = 1)
+    proposed_samples = 1
+    while accept == False:
+        kld = rho_KLD(rho_star, Lambda)
+        d = np.sqrt(2.0 * kld)
+        accept_logprob = -lambda_rho * d
+        logu = np.log(rng.uniform(size = 1))
+        if logu <= accept_logprob:
+            accept = True
+        else: 
+            rho_star = rng.uniform(size = 1)
+            proposed_samples += 1
+    return rho_star, proposed_samples
+    
+def BYM2_prior(Lambda, lambda_rho, p,
+               beta_loc = 0.0, beta_sd = 10.0,
+               #a0 = 0.1, b0 = 0.1,
+               seed = None):
+    # Lambda: 1D array of eigenvalues of spatial precision matrix
+    # lambda_rho: PC penalty parameter for spatial variance proportion
+    # p: number of predictors (beta will include p + 1 columns with intercept)
+    rng = np.random.default_rng(seed = seed)
+    beta = rng.normal(loc = beta_loc, scale = beta_sd, size = p + 1)
+    # IG prior on sigma2
+    #sigma2 = np.reciprocal(rng.gamma(shape = a0, scale = 1.0 / b0))
+    # half normal prior on sigma2
+    sigma2 = np.abs(rng.normal(loc = 0.0, scale = 10.0))
+    rho, proposed_samples = PC_prior(lambda_rho, Lambda, rng)
+    return dict(beta = beta, sigma2 = sigma2, rho = rho)
+    
+def BYM2_likelihood(beta, sigma2, rho, Lambda, A_y, A_x,
+                    seed = None,
+                    simulate_missing = True,
+                    missing_covariates_prob = 1.0,
+                    missing_response_prob = 1.0):
+    # beta: 1D array of regression coefficients (including intercept)
+    # sigma2: total error variance
+    # rho: spatial proportion of variance
+    # Lambda: 1D array of eigenvalues of CAR precision matrix Q
+    # A_y: 2D matrix, factor of response spatial covariance Q^{-1} = A_y A^{t}_y
+    # A_x: 2D matrix, factor of response spatial covariance Q^{-1} = A_x A^{t}_x
+    rng = np.random.default_rng(seed = seed)
+    n = Lambda.size
+    p = beta.size - 1
+    X = np.zeros((n, p))
+    # generate covariates using conditional regressions
+    for i in range(0, p):
+        if (i == 0):
+            linear_combo = np.zeros(shape = n)
+        else:
+            weights = rng.normal(loc = 0.0, scale = 1.0, size = i)
+            linear_combo = np.dot(X[:, :i], weights)
+        noise = CAR_prior(A_x, rng)
+        X[:, i] = linear_combo + noise
+    mu = beta[0] + np.dot(X, beta[1:])
+    gamma = np.sqrt(sigma2 * rho) * CAR_prior(A_y, rng)
+    eta = rng.normal(loc = 0.0, scale = np.sqrt(sigma2 * (1 - rho)), size = n)
+    y = mu + gamma + eta
+    # mask covariates and response randomly
+    X_mask = rng.uniform(size = X.shape) > missing_covariates_prob
+    X[X_mask] = -9001
+    y_mask = rng.uniform(size = y.shape) > missing_response_prob
+    y[y_mask] = -9001
+    # convert masks to integer indices
+    X_mask = X_mask.astype('int')
+    y_mask = y_mask.astype('int')
+    return dict(X = X, X_mask = X_mask, y = y, y_mask = y_mask)
+
+def BYM2_simulators(Lambda, A_y, A_x, )
+
+if __name__ == "__main__":
+    import shp_reader
+    import matplotlib.pyplot as plt
+    # set filepath to US county shapefile
+    print("Reading in US county shapefile...")
+    fp = "../data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
+    # read in shapefile and adjancency matrix of mainland US counties
+    us_mainland, W = shp_reader.read_US_shapefile(fp)
+    print("Done! Constructing CAR covariance matrix using US county map...")
+    # convert contiguity object to dense matrix
+    W_full = W.full()[0]
+    D = np.diag(np.sum(W_full, axis=1))
+    Q = D - 0.99 * W_full
+    n = Q.shape[0]
+    # Eigendecomposition (Q = P * diag(Lambda) * P^{T})
+    Lambda, P = np.linalg.eig(Q)
+    # A = P * Lambda^{-1/2}
+    # Q^{-1} = AA^{T}
+    A = P @ np.diag(np.pow(Lambda, -0.5))
+    Sigma = A @ A.transpose()
+    scaling_factor = np.exp(np.mean(np.log(Sigma.diagonal())))
+    Q_scaled = scaling_factor * Q
+    Sigma_scaled = (1.0 / scaling_factor) * Sigma
+    A_scaled = np.pow(scaling_factor, -0.5) * A
+    Lambda_scaled = Lambda * scaling_factor
+    print("Done! Generating sample from CAR prior...")
+    rng = np.random.default_rng(seed = 11301)
+    z = CAR_prior(A_scaled, rng)
+    us_mainland["z"] = z
+    us_mainland.plot(column = "z", legend = True)
+    plt.title("Simulated CAR Random Effects")
+    print("Done! Generating sample from PC prior on",
+          "spatial variance proportion...")
+    rho, proposed_samples = PC_prior(lambda_rho = 0.005, 
+                                     Lambda = Lambda_scaled, rng = rng)
+    print("Sampled rho:", rho, "| Proposed samples:", proposed_samples)
+    print("Simulating from BYM2 prior with 6 covariates...")
+    p = 6
+    params = BYM2_prior(Lambda_scaled, 0.003, p)
+    print(params)
+    print("Simulating from BYM2 likelihood using sampled parameters...")
+    data = BYM2_likelihood(params["beta"], params["sigma2"], params["rho"], 
+                           Lambda_scaled, A_scaled, A_scaled, seed = 11301, 
+                           simulate_missing = True, 
+                           missing_covariates_prob = 0.8,
+                           missing_response_prob = 0.9)
+    print("Proportion of missing covariates:", np.mean(data["X_mask"]))
+    print("Proportion of missing responses:", np.mean(data["y_mask"]))
+    print(data)
+    y_masked = data["y"].copy()
+    y_masked[data["y_mask"].astype("bool")] = np.nan
+    us_mainland["y"] = y_masked
+    us_mainland.plot(column = "y", legend = True)
+    plt.title("Simulated Response")
+    
+    

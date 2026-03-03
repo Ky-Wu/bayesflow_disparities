@@ -1,3 +1,5 @@
 **/.DS_Store
 generate_CAR_data.py
 data/cb_2017_us_county_500k/
+**/__pycache__
+checkpoints/

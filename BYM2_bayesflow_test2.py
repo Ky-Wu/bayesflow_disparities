@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Mar  2 11:32:40 2026
+Created on Tue Mar  3 08:50:42 2026
 
 @author: kylel
 """
 
 # %% load libraries and config
-
+import jax
+import os
+jax.config.update("jax_enable_x64", False)
+os.environ["KERAS_BACKEND"] = "jax"
 import bayesflow as bf
 import keras
 from src import flattening_net
@@ -17,8 +20,7 @@ from pathlib import Path
 import numpy as np
 import os
 import jax
-jax.config.update("jax_enable_x64", False)
-os.environ["KERAS_BACKEND"] = "jax"
+
 
 
 # US county shapefile
@@ -44,7 +46,7 @@ Sigma_scaled = (1.0 / scaling_factor) * Sigma
 A_scaled = np.pow(scaling_factor, -0.5) * A
 Lambda_scaled = Lambda * scaling_factor
 
-del W, W_full, D, Q, Lambda, A, Sigma
+del W, D, Q, Lambda, A, Sigma
 
 # %% define generative model
 
@@ -68,7 +70,7 @@ data = simulator.sample(2)
 print("Data:", data)
 print("Shapes:", {k: v.shape for k, v in data.items()})
 
-# %% define flattening summary network and adapter
+# %% define summary network and adapter
 
 adapter = (
     bf.Adapter()
@@ -82,8 +84,8 @@ adapter = (
     # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
 )
 
-# Total length = 2(p + 1)n
-summary_net = flattening_net.FlatteningNet((n, (p + 1)))
+# Graph neural network as summary network (spatial data not row-exchangeable)
+summary_net = flattening_net.SummaryGNN(W_full, p + 1, 64, 512)
 
 # %% define inference network and amortizer
 
@@ -91,7 +93,8 @@ inference_net = bf.networks.CouplingFlow(
     num_params=p + 3,
     num_coupling_layers=8,
     coupling_settings={
-        "dense_args": {'kernel_regularizer' : None}, 
+        "dense_args": {'kernel_regularizer' : None,
+                       'units' : 256}, 
         "dropout": False}
 )
 
@@ -105,19 +108,12 @@ workflow = bf.BasicWorkflow(
     standardize=["inference_variables", "summary_variables"]
 )
 
-lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=1e-4,
-    decay_steps=10000,
-    decay_rate=0.95
-)
-
 
 # %% start training!
 
-history = workflow.fit_online(epochs=200, batch_size=64,
+history = workflow.fit_online(epochs=50, batch_size=64,
                               iterations_per_epoch=1000,
-                              validation_data = 64,
-                              optimizer=keras.optimizers.Adam(learning_rate=lr_schedule))
+                              validation_data = 64)
 
 # %% 
 
@@ -157,6 +153,13 @@ f = bf.diagnostics.plots.calibration_histogram(
 
 # %% save bayesflow approximator
 
-output_fp = Path("checkpoints") / "bym2_example.keras"
+output_fp = Path("checkpoints") / "bym2_spatialgnn_e19.keras"
 output_fp.parent.mkdir(exist_ok=True)
 workflow.approximator.save(filepath=output_fp)
+
+# %% load in
+
+history = workflow.fit_online(epochs=100, batch_size=64,
+                              iterations_per_epoch=250,
+                              validation_data = 64)
+

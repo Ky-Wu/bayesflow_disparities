@@ -62,21 +62,10 @@ def BYM2_prior(n_samples, p, Lambda, lambda_rho,
     # half normal prior on sigma2
     sigma2 = np.abs(rng.normal(loc = 0.0, scale = 10.0, size = n_samples))
     rho, proposed_samples = PC_prior(n_samples, lambda_rho, Lambda, rng)
-    return dict(beta = beta, sigma2 = sigma2, rho = rho)
-    
-def BYM2_likelihood(n_samples, beta, sigma2, rho, Lambda, A_y, A_x,
-                    rng = np.random.default_rng(),
-                    simulate_missing = True,
-                    missing_covariates_prob = 0.0,
-                    missing_response_prob = 0.0):
-    # beta: 1D array of regression coefficients (including intercept)
-    # sigma2: total error variance
-    # rho: spatial proportion of variance
-    # Lambda: 1D array of eigenvalues of CAR precision matrix Q
-    # A_y: 2D matrix, factor of response spatial covariance Q^{-1} = A_y A^{t}_y
-    # A_x: 2D matrix, factor of response spatial covariance Q^{-1} = A_x A^{t}_x
-    n = Lambda.size
-    p = beta.shape[-1] - 1
+    return dict(beta = beta, log_sigma2 = np.log(sigma2),
+                logit_rho = np.log(rho / (1 - rho)))
+
+def generate_CAR_covariates(n_samples, n, p, A_x, rng):
     X = np.zeros((n_samples, n, p))
     # generate covariates using conditional regressions
     for i in range(0, p):
@@ -87,6 +76,28 @@ def BYM2_likelihood(n_samples, beta, sigma2, rho, Lambda, A_y, A_x,
             linear_combo = np.einsum('bij,bj->bi', X[:,:,:i], weights)
         noise = CAR_prior(n_samples, A_x, rng)
         X[:,:,i] = linear_combo + noise
+    return X
+    
+def BYM2_likelihood(n_samples, beta, log_sigma2, logit_rho, Lambda, A_y, A_x,
+                    X_fixed = None, # fixes X for all samples if input
+                    rng = np.random.default_rng(),
+                    simulate_missing = True,
+                    missing_covariates_prob = 0.0,
+                    missing_response_prob = 0.0):
+    # beta: 1D array of regression coefficients (including intercept)
+    # sigma2: total error variance
+    # rho: spatial proportion of variance
+    # Lambda: 1D array of eigenvalues of CAR precision matrix Q
+    # A_y: 2D matrix, factor of response spatial covariance Q^{-1} = A_y A^{t}_y
+    # A_x: 2D matrix, factor of response spatial covariance Q^{-1} = A_x A^{t}_x
+    sigma2 = np.exp(log_sigma2)
+    rho = 1.0 / (1.0 + np.exp(-logit_rho))
+    n = Lambda.size
+    p = beta.shape[-1] - 1
+    if (X_fixed is None):
+        X = generate_CAR_covariates(n_samples, n, p, A_x, rng)
+    else:
+        X = np.repeat(X_fixed[np.newaxis, ...], repeats = n_samples, axis = 0)
     # first compute mu = E[y | X, beta]
     y = np.repeat(beta[:,0][:, np.newaxis], n, axis = 1)
     y += np.einsum('bij,bj->bi', X, beta[:,1:])
@@ -112,18 +123,27 @@ def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
                     rng = np.random.default_rng(),
                     simulate_missing = True,
                     missing_covariates_prob = 0.0,
-                    missing_response_prob = 0.0):
+                    missing_response_prob = 0.0,
+                    beta_loc = 0.0, beta_sd = 10.0, fix_X = False):
+    n = Lambda.size
+    if fix_X:
+        X = generate_CAR_covariates(1, n, p, A_x, rng).squeeze()
+    else:
+        X = None
     def prior(batch_size):
-        res = BYM2_prior(batch_size[0], p, Lambda, lambda_rho, rng = rng)
+        res = BYM2_prior(batch_size[0], p, Lambda, lambda_rho,
+                         beta_loc = beta_loc, beta_sd = beta_sd,
+                         rng = rng)
         return res
-    def likelihood(batch_size, beta, sigma2, rho):
-        res = BYM2_likelihood(batch_size[0], beta, sigma2, rho, Lambda, A_y, A_x,
-                              rng = rng,
+    def likelihood(batch_size, beta, log_sigma2, logit_rho):
+        res = BYM2_likelihood(batch_size[0], beta, log_sigma2, logit_rho,
+                              Lambda, A_y, A_x,
+                              rng = rng, X_fixed = X,
                               simulate_missing = True,
                               missing_covariates_prob = missing_covariates_prob,
                               missing_response_prob = missing_response_prob)
         return res
-    return prior, likelihood
+    return prior, likelihood, X
 
 if __name__ == "__main__":
     import shp_reader
@@ -158,21 +178,21 @@ if __name__ == "__main__":
     plt.title("Simulated CAR Random Effects")
     print("Done! Generating 10 samples from PC prior on",
           "spatial variance proportion...")
-    n_samples = 10
-    rho, proposed_samples = PC_prior(n_samples = n_samples, lambda_rho = 0.005, 
+    n_samples = (10,)
+    rho, proposed_samples = PC_prior(n_samples = n_samples[0], lambda_rho = 0.005, 
                                      Lambda = Lambda_scaled, rng = rng)
     print("Sampled rho:", rho, "| Proposed samples:", proposed_samples)
     print("Simulating from BYM2 prior with 6 covariates...")
     p = 6
     lambda_rho = 0.003
-    prior, likelihood = BYM2_simulators(Lambda_scaled, A_scaled, 
-                                        A_scaled, lambda_rho, p,
-                                        rng, True, 0.0, 0.0)
+    prior, likelihood, fix_X = BYM2_simulators(Lambda_scaled, A_scaled, 
+                                               A_scaled, lambda_rho, p,
+                                               rng, True, 0.0, 0.0)
     params = prior(n_samples)
     print(params)
     print("Simulating from BYM2 likelihood using sampled parameters...")
     data = likelihood(n_samples,
-                      params["beta"], params["sigma2"], params["rho"])
+                      params["beta"], params["log_sigma2"], params["logit_rho"])
     print("Proportion of missing covariates:", np.mean(data["X_mask"]))
     print("Proportion of missing responses:", np.mean(data["y_mask"]))
     print(data)

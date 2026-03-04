@@ -53,6 +53,21 @@ def read_US_shapefile(fp):
     
     return us_mainland, W
 
+def read_CA_shapefile(fp):
+    
+    # read in data
+    county_shp = gpd.read_file(fp)
+    ca_shp = county_shp.query("STATEFP in ['06']")
+
+    # Albers Equal Area Conic projection, units: meters
+    ca_shp = ca_shp.to_crs(5070)
+    # reset index
+    ca_shp = ca_shp.reset_index(drop=True)
+
+    W = Rook.from_dataframe(ca_shp, use_index = False)
+    
+    return ca_shp, W
+
 if __name__ == "__main__":
     # set filepath to US county shapefile
     fp = "../data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"

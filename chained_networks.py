@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Tue Mar  3 20:58:33 2026
+Created on Wed Mar  4 20:00:33 2026
 
 @author: kylel
 """
@@ -26,7 +26,7 @@ fp = "data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
 
 # %% read in shapefile and compute scaled CAR covariance
 
-ca_shp, W = shp_reader.read_US_shapefile(fp)
+ca_shp, W = shp_reader.read_CA_shapefile(fp)
 
 W_full = W.full()[0]
 D = np.diag(np.sum(W_full, axis=1))
@@ -49,7 +49,7 @@ del W, D, Q, Lambda, A, Sigma
 # %% define generative model
 
 # prior hyperparameters
-lambda_rho = 0.0335
+lambda_rho = 0.03
 # number of covariates (predictors)
 p = 7
 
@@ -70,53 +70,45 @@ data = simulator.sample(50)
 print("Data:", data)
 print("Shapes:", {k: v.shape for k, v in data.items()})
 
-# %% define summary network and adapter
 
-adapter = (
+# %% define summary network and adapter for fixed effects
+
+beta_adapter = (
     bf.Adapter()
-    # .as_set(["X", "y", "X_mask", "y_mask"])
-    .as_set(["y"])
     .convert_dtype("float64", "float32")
-    .concatenate(["beta", "log_sigma2", "logit_rho"], into="inference_variables")
+    .concatenate(["beta"], into="inference_variables")
     .concatenate(["y"], into="summary_variables")
     # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
 )
 
 # Graph neural network as summary network (spatial data not row-exchangeable)
-summary_net = summary_networks.PoolSummaryGNN(
-    adjacency_matrix = W_full,
-    n_features = 1, 
-    gnn_dim = 32,
-    hidden_dim = 128,
-    summary_dim = 32)
+beta_summary_net = summary_networks.SummaryGNN(W_full, 1, 32, 32, 16)
 
-summary_net = summary_networks.SummaryGNN(W_full, 1, compress_dim = 64,
-                                          gnn_dim = 32, summary_dim = 16)
-# %% define inference network and amortizer
+# %% define inference network and amortizer for fixed effects
 
-inference_net = bf.networks.CouplingFlow(
-    num_params=p + 3,
-    num_coupling_layers=10,
+beta_inference_net = bf.networks.CouplingFlow(
+    num_params = p + 1,
+    num_coupling_layers=6,
     coupling_settings={
         "dense_args": {'kernel_regularizer' : None,
                        'units' : 256}, 
         "dropout": False}
 )
 
-# %% define workflow, combining summary and inference network into approximator
+# %% define workflow, combining beta summary and inference network into approximator
 
-workflow = bf.BasicWorkflow(
+beta_workflow = bf.BasicWorkflow(
     simulator=simulator,
-    adapter=adapter,
-    inference_network=inference_net,
-    summary_network=summary_net,
+    adapter=beta_adapter,
+    inference_network=beta_inference_net,
+    summary_network=beta_summary_net,
     standardize=["inference_variables"]
 )
 
-# %% define optimizer
+# %% define beta optimizer
 
 # Define a schedule: Start at 5e-4, reduce by 10% every 1000 steps
-lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+beta_lr_schedule = keras.optimizers.schedules.ExponentialDecay(
     initial_learning_rate=5e-4, 
     decay_steps=250, 
     decay_rate=0.99,
@@ -152,62 +144,132 @@ class CleanLRLogger(keras.callbacks.Callback):
             logs['lr'] = float(current_lr)
         
         
-checkpoint = keras.callbacks.ModelCheckpoint(
-    filepath='checkpoints/bym2_us_p7_Xfixed.weights.h5',
+beta_checkpoint = keras.callbacks.ModelCheckpoint(
+    filepath='checkpoints/bym2_ca_beta_p7_Xfixed.weights.h5',
     monitor='val_loss',
     save_best_only=True,
     save_weights_only=True
 )
 
-optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
+beta_optimizer = keras.optimizers.Adam(learning_rate=beta_lr_schedule)
 
 # %% start training!
 
-history = workflow.fit_online(epochs = 300, 
+history = beta_workflow.fit_online(epochs = 100, 
                               batch_size = 64,
                               iterations_per_epoch = 1000,
                               validation_data = 64,
-                              optimizer = optimizer,
-                              callbacks = [CleanLRLogger(), checkpoint])
+                              optimizer = beta_optimizer,
+                              callbacks = [CleanLRLogger(), beta_checkpoint],
+                              checkpoint_path = "checkpoints")
 
-"""
-# %% keep training...
+# %% check diagnostics
 
-lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=1e-6,
-    decay_steps=1000, 
-    decay_rate=0.9,
+bf.diagnostics.plots.loss(history)
+
+num_samples = 5000
+val_sims = simulator.sample(200)
+post_draws = beta_workflow.sample(conditions=val_sims, num_samples=num_samples)
+post_draws.keys()
+
+par_names = [r"$\beta_0$", r"$\beta_1$", r"$\beta_2$", r"$\beta_3$",
+             r"$\beta_4$", r"$\beta_5$", r"$\beta_6$", r"$\beta_7$"]
+f = bf.diagnostics.plots.pairs_posterior(
+    estimates=post_draws, 
+    targets=val_sims,
+    dataset_id=0,
+    variable_names=par_names,
+)
+
+f = bf.diagnostics.plots.recovery(
+    estimates=post_draws, 
+    targets=val_sims,
+    variable_names=par_names
+)
+
+f = bf.diagnostics.plots.calibration_histogram(
+    estimates=post_draws, 
+    targets=val_sims,
+    variable_names=par_names
+)
+
+# %% define summary network and adapter for variance parameters
+
+var_adapter = (
+    bf.Adapter()
+    .convert_dtype("float64", "float32")
+    .concatenate(["log_sigma2", "logit_rho"], into="inference_variables")
+    .concatenate(["y", "mu"], into="summary_variables")
+    # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
+)
+
+# Graph neural network as summary network (spatial data not row-exchangeable)
+var_summary_net = summary_networks.SummaryGNN(W_full, 2, 64, 64, 32)
+
+# %% define var inference network and amortizer
+
+var_inference_net = bf.networks.CouplingFlow(
+    num_params = 2,
+    num_coupling_layers=6,
+    coupling_settings={
+        "dense_args": {'kernel_regularizer' : None,
+                       'units' : 256}, 
+        "dropout": False}
+)
+
+# %% define var workflow, combining summary and inference network into approximator
+
+workflow = bf.BasicWorkflow(
+    simulator=simulator,
+    adapter=var_adapter,
+    inference_network=var_inference_net,
+    summary_network=var_summary_net,
+    standardize=["inference_variables"]
+)
+
+# %% define var optimizer
+
+# Define a schedule: Start at 5e-4, reduce by 10% every 1000 steps
+var_lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate=5e-4, 
+    decay_steps=250, 
+    decay_rate=0.99,
     staircase=True
 )
 
-optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
+var_checkpoint = keras.callbacks.ModelCheckpoint(
+    filepath='checkpoints/bym2_ca_sigma2rho_p7_Xfixed.weights.h5',
+    monitor='val_loss',
+    save_best_only=True,
+    save_weights_only=True
+)
 
-history = workflow.fit_online(epochs=500, batch_size=64,
-                              iterations_per_epoch=1000,
+var_optimizer = keras.optimizers.Adam(learning_rate=var_lr_schedule)
+
+# %% start training variance network!
+
+history = workflow.fit_online(epochs = 100, 
+                              batch_size = 64,
+                              iterations_per_epoch = 1000,
                               validation_data = 64,
-                              optimizer = optimizer)
-"""
+                              optimizer = var_optimizer,
+                              callbacks = [CleanLRLogger(), var_checkpoint],
+                              checkpoint_path = "checkpoints")
 
-# %% plot loss
+ # %%  diagnostic plots
 
 bf.diagnostics.plots.loss(history)
 
 # %% draw validation set
 
-num_samples = 1000
+num_samples = 5000
 val_sims = simulator.sample(200)
 post_draws = workflow.sample(conditions=val_sims, num_samples=num_samples)
 post_draws.keys()
 
 # %% plot posterior samples for first dataset
 
-par_names = [r"$\beta_0$", r"$\beta_1$", r"$\beta_2$", r"$\beta_3$",
-             r"$\beta_4$", r"$\beta_5$", r"$\beta_6$", r"$\beta_7$",
-             r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"]
-#par_names = [r"$\beta_0$", r"$\beta_1$", 
-#             r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"]
-#par_names = [r"$\beta_0$", r"$\beta_1$", r"$\beta_2$", r"$\beta_3$",
-#             r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"]
+par_names = [r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"]
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 
     targets=val_sims,
@@ -231,17 +293,9 @@ f = bf.diagnostics.plots.calibration_histogram(
 
 # %% save bayesflow approximator
 
-output_fp = Path("checkpoints") / "bym2_spatialgnn_p7_fixedXus.keras"
+output_fp = Path("checkpoints") / "bym2_spatialgnn_p7_sigma2rho_p7_fixedX.keras"
 output_fp.parent.mkdir(exist_ok=True)
 workflow.approximator.save(filepath=output_fp)
 
-# %% save covariate matrix if fixed
+# %% chain networks
 
-X_fixed_outputfp = Path("checkpoints") / "X_us_p7.npy"
-np.save(X_fixed_outputfp, X_fixed)
-
-# %% load in
-
-history = workflow.fit_online(epochs=100, batch_size=64,
-                              iterations_per_epoch=250,
-                              validation_data = 64)

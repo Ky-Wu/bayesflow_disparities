@@ -99,8 +99,8 @@ def BYM2_likelihood(n_samples, beta, log_sigma2, logit_rho, Lambda, A_y, A_x,
     else:
         X = np.repeat(X_fixed[np.newaxis, ...], repeats = n_samples, axis = 0)
     # first compute mu = E[y | X, beta]
-    y = np.repeat(beta[:,0][:, np.newaxis], n, axis = 1)
-    y += np.einsum('bij,bj->bi', X, beta[:,1:])
+    mu = np.repeat(beta[:,0][:, np.newaxis], n, axis = 1)
+    mu += mu + np.einsum('bij,bj->bi', X, beta[:,1:])
     # compute latent spatial effects gamma with CAR prior
     gamma = CAR_prior(n_samples, A_y, rng)
     gamma = np.einsum('bi,b->bi', gamma, np.sqrt(sigma2 * rho))
@@ -108,7 +108,10 @@ def BYM2_likelihood(n_samples, beta, log_sigma2, logit_rho, Lambda, A_y, A_x,
     eta = rng.normal(loc = 0.0, scale = 1.0, size = (n_samples, n))
     eta = np.einsum('bi,b->bi', eta, np.sqrt(sigma2 * (1 - rho)))
     # add in error terms
-    y += gamma + eta
+    y = mu + gamma + eta
+    # reshape to 2D array
+    y = y[:,:,np.newaxis]
+    mu = mu[:,:,np.newaxis]
     # mask covariates and response randomly
     X_mask = rng.uniform(size = X.shape) < missing_covariates_prob
     X[X_mask] = -9001
@@ -117,7 +120,7 @@ def BYM2_likelihood(n_samples, beta, log_sigma2, logit_rho, Lambda, A_y, A_x,
     # convert masks to integer indices
     X_mask = X_mask.astype('int')
     y_mask = y_mask.astype('int')
-    return dict(X = X, X_mask = X_mask, y = y, y_mask = y_mask)
+    return dict(X = X, X_mask = X_mask, y = y, y_mask = y_mask, mu = mu)
 
 def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
                     rng = np.random.default_rng(),

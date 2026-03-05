@@ -49,9 +49,9 @@ del W, D, Q, Lambda, A, Sigma
 # %% define generative model
 
 # prior hyperparameters
-lambda_rho = 0.05
+lambda_rho = 0.03
 # number of covariates (predictors)
-p = 7
+p = 0
 
 prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(Lambda_scaled,
                                              A_scaled, A_scaled, lambda_rho, p,
@@ -156,7 +156,7 @@ optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
 
 # %% start training!
 
-history = workflow.fit_online(epochs = 1000, 
+history = workflow.fit_online(epochs = 300, 
                               batch_size = 64,
                               iterations_per_epoch = 1000,
                               validation_data = 64,
@@ -182,7 +182,7 @@ history = workflow.fit_online(epochs=500, batch_size=64,
                               optimizer = optimizer)
 """
 
-# %%  diagnostic plots
+ # %%  diagnostic plots
 
 bf.diagnostics.plots.loss(history)
 

@@ -106,7 +106,7 @@ def BYM2_likelihood(n_samples, beta, log_sigma2, logit_rho, Lambda, A_y, A_x,
     gamma = np.einsum('bi,b->bi', gamma, np.sqrt(sigma2 * rho))
     # compute non-spatial error term
     eta = rng.normal(loc = 0.0, scale = 1.0, size = (n_samples, n))
-    eta = np.einsum('bi,b->bi', eta, np.sqrt(sigma2 * (1 - rho)))
+    eta = np.einsum('bi,b->bi', eta, np.sqrt(sigma2 * (1.0 - rho)))
     # add in error terms
     y = mu + gamma + eta
     # reshape to 2D array

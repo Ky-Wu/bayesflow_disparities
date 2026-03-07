@@ -18,7 +18,6 @@ from keras import layers, ops
 import numpy as np
 import tensorflow as tf
 
-  
 class FlatteningNet(bf.networks.SummaryNetwork):
     def __init__(self, input_shape, **kwargs):
         """
@@ -59,11 +58,18 @@ class FlatteningNet(bf.networks.SummaryNetwork):
         return self.internal_model.output_shape
 
 
-
+@keras.saving.register_keras_serializable(package="BayesflowSpatialSummary")
 class SummaryGNN(bf.networks.SummaryNetwork):
     def __init__(self, adjacency_matrix, n_features, compress_dim=64, 
                  gnn_dim=64, summary_dim=16, **kwargs):
         super().__init__(**kwargs)
+        
+        # save input arguments for recovery in config
+        self.adjacency_matrix = np.asarray(adjacency_matrix)
+        self.n_features = n_features
+        self.compress_dim = compress_dim
+        self.gnn_dim = gnn_dim
+        self.summary_dim = summary_dim
         
         # --- 1. Precompute Constants ---
         A_tilde = adjacency_matrix + np.eye(adjacency_matrix.shape[0])
@@ -145,8 +151,30 @@ class SummaryGNN(bf.networks.SummaryNetwork):
         ], axis=-1)
         
         return self.fc_out(summary)
-
-
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "adjacency_matrix": self.adjacency_matrix.tolist(),
+            "n_features": self.n_features,
+            "compress_dim": self.compress_dim,
+            "gnn_dim": self.gnn_dim,
+            "summary_dim": self.summary_dim
+        })
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        """
+        Explicitly convert the serialized list back to a numpy array 
+        before passing it to the constructor.
+        """
+        if "adjacency_matrix" in config:
+            config["adjacency_matrix"] = np.array(config["adjacency_matrix"])
+        return cls(**config)
+    
+    
+""" 
 class PoolSummaryGNN(bf.networks.SummaryNetwork):
     def __init__(self, adjacency_matrix, n_features, gnn_dim=128, 
                  hidden_dim = 256, summary_dim=64, **kwargs):
@@ -229,6 +257,8 @@ class PoolSummaryGNN(bf.networks.SummaryNetwork):
         lograyleigh_stat = ops.log(ops.mean(h2 * h_residual, axis=1) + 1e-10) \
             - ops.log(ops.mean(ops.square(h2), axis=1) + 1e-10)
             
+
+            
         # Step 6: Final Summary Vector
         summary = ops.concatenate([
             y_scale,                # (batch, 1)
@@ -243,3 +273,5 @@ class PoolSummaryGNN(bf.networks.SummaryNetwork):
         # Step 7. Final Interpretation Block (Deep enough for unnormalized data)
         summary_hidden = ops.swish(self.fc_hidden(summary))
         return self.fc_out(summary_hidden)
+    
+"""

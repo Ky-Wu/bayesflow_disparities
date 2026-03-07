@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Sat Feb 28 15:10:20 2026
-
 @author: kylel
 """
 
@@ -67,6 +65,7 @@ def read_CA_shapefile(fp):
     W = Rook.from_dataframe(ca_shp, use_index = False)
     
     return ca_shp, W
+
 
 if __name__ == "__main__":
     # set filepath to US county shapefile

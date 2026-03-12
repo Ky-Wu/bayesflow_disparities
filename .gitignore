@@ -5,3 +5,4 @@ data/cb_2017_us_county_500k/
 src/__pycache__
 checkpoints/
 output/
+data/

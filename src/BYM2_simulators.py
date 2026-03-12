@@ -8,18 +8,66 @@ Created on Sat Feb 28 20:26:54 2026
 
 import numpy as np
 
-def CAR_prior(n_samples, A, rng):
-    # A: 2D square matrix where Q^{-1} = AA^{\T}
-    # rng: output from np.random.default_rng(seed = seed)
+def CAR_prior(n_samples: int,
+              A: np.array,
+              rng: np.random.default_rng = np.random.default_rng()) -> np.array:
+    """
+
+    Parameters
+    ----------
+    n_samples : int
+        number of samples to draw from CAR distribution
+    A : np.array
+        asymmetric matrix factor A such that precision matrix Q^{-1} = AA^{T}
+    rng : np.random.default_rng, optional
+        Random number generator. The default is np.random.default_rng().
+
+    Raises
+    ------
+    AttributeError
+        Matrix factor A must be square
+
+    Returns
+    -------
+    x : np.array
+        array of samples
+
+    """
     if A.shape[0] != A.shape[1]:
-        raise AttributeError("RInv must be square")
+        raise AttributeError("A must be square")
     x = rng.normal(size = (n_samples, A.shape[0]))
     x = x @ A.transpose()
     return x
 
-def rho_KLD(rho, Lambda):
-    # rho: spatial proportion of variance in BYM2 model
-    # Lambda: 1D numpy array of eigenvalues of spatial precision matrix
+def rho_KLD(rho: float,
+            Lambda: np.array,
+            check_rho: bool = False) -> float:
+    """
+    
+
+    Parameters
+    ----------
+    rho : float
+        Spatial proportion of noise in [0,1]
+    Lambda : np.array
+        Array of eigenvalues of spatial precision matrix
+    check_rho : bool, optional
+        Whether to check rho is in [0,1]. The default is False.
+
+    Raises
+    ------
+    ValueError
+        rho, spatial proportion of variance, must lie in interval [0,1]
+
+    Returns
+    -------
+    float
+        Kullback-Leiber divergence term for penalized-complexity prior on rho.
+
+    """
+    if (check_rho):
+        if (rho < 0 or rho > 1):
+            raise ValueError("rho must be in [0,1]")
     n = Lambda.size
     kld = -n * rho / 2.0
     kld += np.sum(rho / Lambda) / 2.0
@@ -49,10 +97,14 @@ def PC_prior(n_samples, lambda_rho, Lambda, rng):
         proposed_samples[i] = current_samples
     return rho_samples, proposed_samples
     
-def BYM2_prior(n_samples, p, Lambda, lambda_rho, 
-               beta_loc = 0.0, beta_sd = 10.0,
-               rng = np.random.default_rng(),
-               beta_noise_sd = 1.0):
+def BYM2_prior(n_samples,
+               p,
+               Lambda,
+               lambda_rho, 
+               beta_loc = 0.0,
+               beta_sd = 10.0,
+               beta_noise_sd = 1.0,
+               rng = np.random.default_rng()):
     # Lambda: 1D array of eigenvalues of spatial precision matrix
     # lambda_rho: PC penalty parameter for spatial variance proportion
     # p: number of predictors (beta will include p + 1 columns with intercept)
@@ -86,12 +138,12 @@ def generate_CAR_covariates(n_samples, n, p, A_x, rng):
     
 def BYM2_likelihood(n_samples, beta, beta_corrupted,
                     log_sigma2, logit_rho, Lambda, A_y, A_x,
-                    beta_noise = None,
                     X_fixed = None, # fixes X for all samples if input
-                    rng = np.random.default_rng(),
-                    simulate_missing = True,
-                    missing_covariates_prob = 0.0,
-                    missing_response_prob = 0.0):
+                    corrupt_residual = True,
+                    rng = np.random.default_rng()):
+                    #simulate_missing = True,
+                    #missing_covariates_prob = 0.0,
+                    #missing_response_prob = 0.0):
     # beta: 1D array of regression coefficients (including intercept)
     # sigma2: total error variance
     # rho: spatial proportion of variance
@@ -109,8 +161,6 @@ def BYM2_likelihood(n_samples, beta, beta_corrupted,
     # first compute mu = E[y | X, beta]
     mu = np.repeat(beta[:,0][:, np.newaxis], n, axis = 1)
     mu += np.einsum('bij,bj->bi', X, beta[:,1:])
-    mu_corrupted = np.repeat(beta_corrupted[:,0][:, np.newaxis], n, axis = 1)
-    mu_corrupted += np.einsum('bij,bj->bi', X, beta_corrupted[:,1:])
     # compute latent spatial effects gamma with CAR prior
     gamma = CAR_prior(n_samples, A_y, rng)
     gamma = np.einsum('bi,b->bi', gamma, np.sqrt(sigma2 * rho))
@@ -122,7 +172,14 @@ def BYM2_likelihood(n_samples, beta, beta_corrupted,
     # reshape to 2D array
     y = y[:,:,np.newaxis]
     mu = mu[:,:,np.newaxis]
-    r = y - mu
+    if corrupt_residual:
+        mu_corrupted = np.repeat(beta_corrupted[:,0][:, np.newaxis], n, axis = 1)
+        mu_corrupted += np.einsum('bij,bj->bi', X, beta_corrupted[:,1:])
+        mu_corrupted = mu_corrupted[:,:,np.newaxis]
+        r = y - mu_corrupted
+    else:
+        r = y - mu
+    """
     # mask covariates and response randomly
     X_mask = rng.uniform(size = X.shape) < missing_covariates_prob
     X[X_mask] = -9001
@@ -132,13 +189,18 @@ def BYM2_likelihood(n_samples, beta, beta_corrupted,
     X_mask = X_mask.astype('int')
     y_mask = y_mask.astype('int')
     return dict(X = X, X_mask = X_mask, y = y, y_mask = y_mask,
-                mu = mu, mu_corrupted = mu_corrupted, r = r)
+                mu = mu,
+                r = r)
+    """
+    return dict(X = X, y = y, r = r)
 
 def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
                     rng = np.random.default_rng(),
-                    simulate_missing = True,
-                    missing_covariates_prob = 0.0,
-                    missing_response_prob = 0.0,
+                    corrupt_residual = False,
+                    beta_noise_sd = 1.0,
+                    #simulate_missing = True,
+                    #missing_covariates_prob = 0.0,
+                    #missing_response_prob = 0.0,
                     beta_loc = 0.0, beta_sd = 10.0,
                     fix_X = False, X = None):
     n = Lambda.size
@@ -147,16 +209,16 @@ def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
     def prior(batch_size):
         res = BYM2_prior(batch_size[0], p, Lambda, lambda_rho,
                          beta_loc = beta_loc, beta_sd = beta_sd,
+                         beta_noise_sd = beta_noise_sd,
                          rng = rng)
         return res
     def likelihood(batch_size, beta, beta_corrupted, log_sigma2, logit_rho):
         res = BYM2_likelihood(batch_size[0], beta, beta_corrupted,
                               log_sigma2, logit_rho,
                               Lambda, A_y, A_x,
-                              rng = rng, X_fixed = X,
-                              simulate_missing = simulate_missing,
-                              missing_covariates_prob = missing_covariates_prob,
-                              missing_response_prob = missing_response_prob)
+                              X_fixed = X, 
+                              corrupt_residual = corrupt_residual,
+                              rng = rng)
         return res
     return prior, likelihood, X
 

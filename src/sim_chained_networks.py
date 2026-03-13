@@ -67,7 +67,7 @@ prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(Lambda_scaled,
                                              rng = rng,
                                              corrupt_residual = corrupt_residual,
                                              beta_noise_sd = 1.0,
-                                             beta_loc = 0.0, beta_sd = 5.0,
+                                             beta_loc = 0.0, beta_sd = 1.0,
                                              fix_X = fix_X)
 simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
@@ -95,12 +95,19 @@ beta_summary_net = summary_networks.SummaryIdentity()
 
 # %% define inference network and amortizer for fixed effects
 
-depth = 6
+depth = 8
 beta_inference_net = bf.networks.CouplingFlow(
     depth=depth,
     permutation = None,
-    transform = "affine"
+    transform = "affine",   
+    subnet_kwargs={
+       "units": [256 for i in range(depth)],  # Widths of the hidden layers
+       "activation": "swish",
+       "dropout": False,
+       "dropout_prob": 0.0
+   }
 )
+
 
 # %% define workflow, combining beta summary and inference network into approximator
 
@@ -181,10 +188,12 @@ f = bf.diagnostics.plots.recovery(
 )
 f.savefig(output_dir + "beta_recovery.png")
 
-f = bf.diagnostics.plots.calibration_histogram(
+f = bf.diagnostics.plots.calibration_ecdf(
     estimates=post_draws, 
     targets=val_sims,
-    variable_names=par_names
+    variable_names=par_names,
+    difference = True,
+    rank_type="distance"
 )
 f.savefig(output_dir + "beta_calibration.png")
 
@@ -192,13 +201,13 @@ f.savefig(output_dir + "beta_calibration.png")
 
 beta_postsd = np.std(post_draws['beta'], axis = 1)
 beta_avgpostsd = np.mean(beta_postsd, axis = 0)
-beta_noise_sd = beta_avgpostsd * 1.2
+beta_noise_sd = beta_avgpostsd
 
 prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(Lambda_scaled,
                                              A_scaled, A_scaled, lambda_rho, p,
                                              rng = rng,
                                              corrupt_residual = True,
-                                             beta_loc = 0.0, beta_sd = 5.0,
+                                             beta_loc = 0.0, beta_sd = 1.0,
                                              beta_noise_sd = beta_noise_sd,
                                              fix_X = True, X = X_fixed)
 simulator = bf.simulators.SequentialSimulator([
@@ -217,15 +226,22 @@ var_adapter = (
 )
 
 # Graph neural network as summary network (spatial data not row-exchangeable)
-var_summary_net = summary_networks.SummaryGNN(W_full, 32, 32, 16, 8)
-#var_summary_net = summary_networks.SummaryIdentity()
+#var_summary_net = summary_networks.SummaryGNN(W_full, 32, 32, 16, 8)
+var_summary_net = summary_networks.SummaryIdentity()
 
 # %% define var inference network and amortizer
 
+depth = 6
 var_inference_net = bf.networks.CouplingFlow(
-    depth=6,
+    depth=depth,
     permutation = None,
-    transform = "affine"
+    transform = "affine", 
+    subnet_kwargs={
+       "units": [256 for i in range(depth)],  # Widths of the hidden layers
+       "activation": "swish",
+       "dropout": False,
+       "dropout_prob": 0.0
+   }
 )
 
 # %% define var workflow, combining summary and inference network into approximator
@@ -308,10 +324,12 @@ f = bf.diagnostics.plots.recovery(
 )
 f.savefig(output_dir + "var_recovery.png")
 
-f = bf.diagnostics.plots.calibration_histogram(
+f = bf.diagnostics.plots.calibration_ecdf(
     estimates=post_draws, 
     targets=val_sims,
-    variable_names=par_names
+    variable_names=par_names,
+    difference = True,
+    rank_type="distance"
 )
 f.savefig(output_dir + "var_calibration.png")
 
@@ -342,7 +360,7 @@ f.savefig(output_dir + "chained_postsamples.png")
 
 f = bf.diagnostics.plots.calibration_ecdf(
     estimates=post_draws, 
-    targets=val_sims,
+    targets=data,
     variable_names=par_names,
     difference=True,
     rank_type="distance"

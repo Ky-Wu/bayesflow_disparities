@@ -102,7 +102,7 @@ def BYM2_prior(n_samples,
                Lambda,
                lambda_rho, 
                beta_loc = 0.0,
-               beta_sd = 10.0,
+               beta_sd = 1.0,
                beta_noise_sd = 1.0,
                rng = np.random.default_rng()):
     # Lambda: 1D array of eigenvalues of spatial precision matrix
@@ -112,7 +112,7 @@ def BYM2_prior(n_samples,
     # IG prior on sigma2
     #sigma2 = np.reciprocal(rng.gamma(shape = a0, scale = 1.0 / b0))
     # half normal prior on sigma2
-    sigma2 = np.abs(rng.normal(loc = 0.0, scale = 10.0, size = n_samples))
+    sigma2 = np.abs(rng.normal(loc = 0.0, scale = 1.0, size = n_samples))
     # normal prior on fixed effects
     beta = rng.normal(loc = beta_loc, scale = beta_sd, 
                       size = (n_samples, p + 1))

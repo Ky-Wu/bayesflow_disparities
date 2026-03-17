@@ -30,8 +30,8 @@ shp_fp = "data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
 data_fp = "output/RDA/data_cleaned.csv"
 model_name = "US_lungcancer"
 output_dir = "output/RDA/"
-beta_output_fp = Path("checkpoints") / (model_name + "_beta_net.keras")
-var_fp = Path("checkpoints") /  (model_name + "_var_net.keras")
+beta_output_fp = Path("checkpoints") / (model_name + "_beta_net_oldv2.keras")
+var_fp = Path("checkpoints") /  (model_name + "_var_net_oldv2.keras")
 
 rng = np.random.default_rng(seed = 1130)
 
@@ -67,12 +67,12 @@ var_approximator = keras.saving.load_model(var_fp)
 
 # %% chain sampling settings
 
-n_samples = 1000
+n_samples = 5000
 var_batch_size = 50
 
 # %% draw posterior samples
 
-post_draws = bayesflow_helpers.simulateChainSamples(
+post_draws = bayesflow_helpers.simulate_chain_samples(
     n_samples, data, X_scaled, beta_approximator, var_approximator,
     var_batch_size = var_batch_size)
 
@@ -85,42 +85,6 @@ f = bf.diagnostics.plots.pairs_posterior(
     targets=None,
     variable_names=par_names,
 )
-#f.savefig(output_dir + "_analysis_postsamples.png")
+f.savefig(output_dir + "RDA_analysis_postsamples.png")
 
-# %% get adjacency 
 
-W = Rook.from_dataframe(data_shp, use_index = False)
-W_full = W.full()[0]
-Q_scaled, Sigma_scaled, Lambda_scaled, A_scaled = scaled_CAR(W_full)
-n = Q_scaled.shape[0]
-
-# %% define generative model
-
-lambda_rho = 0.001
-prior, likelihood, _ = bym2_sim.BYM2_simulators(Lambda_scaled,
-                                             A_scaled, A_scaled, lambda_rho, p,
-                                             rng = rng,
-                                             corrupt_residual = False,
-                                             beta_noise_sd = 1.0,
-                                             beta_loc = 0.0, beta_sd = 0.5,
-                                             fix_X = True, X = X_scaled)
-simulator = bf.simulators.SequentialSimulator([
-    bf.simulators.LambdaSimulator(prior, is_batched=True),
-    bf.simulators.LambdaSimulator(likelihood, is_batched=True)
-])
-
-# sample from joint distribution
-simulated_data = simulator.sample(50)
-print("Data:", data)
-print("Shapes:", {k: v.shape for k, v in data.items()})
-
-# %% 
-
-# inference model breaks down when true regression coefficients are too small?
-data = bym2_sim.BYM2_likelihood(1,
-                                rng.normal(scale = 2, size = (1, p + 1)),
-                                np.zeros((1, p + 1)),
-                                np.reshape(np.array(1), shape = (1)),
-                                np.reshape(np.array(-3), shape = (1)),
-                                Lambda_scaled, A_scaled, A_scaled,
-                                X_fixed = X_scaled)

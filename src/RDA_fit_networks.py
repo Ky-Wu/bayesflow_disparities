@@ -11,12 +11,13 @@ import jax
 import os
 jax.config.update("jax_enable_x64", False)
 os.environ["KERAS_BACKEND"] = "jax"
+os.environ['JAX_PLATFORMS'] = 'cpu'
 import bayesflow as bf
 import keras
 from src import summary_networks
 from src import BYM2_simulators as bym2_sim
 from src import shp_reader
-from src import bayesflow_helpers
+from src import bayesflow_helpers as bfhelp
 from src.spatial_covariance import scaled_CAR
 from pathlib import Path
 import numpy as np
@@ -30,7 +31,8 @@ model_name = "US_lungcancer"
 output_dir = "output/RDA/"
 beta_output_fp = Path("checkpoints") / (model_name + "_beta_net.keras")
 var_fp = Path("checkpoints") /  (model_name + "_var_net.keras")
-beta_prior_sd = 1.0
+beta_prior_sd = np.sqrt(10.0)
+sigma2_prior_sd = np.sqrt(10.0)
 rng = np.random.default_rng(seed = 1130)
 
 # %% load in shapefile and cleaned data from RDA_data_setup.py
@@ -54,6 +56,9 @@ y = data_shp[['mortality2014']]
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 #y_scaled = scaler.fit_transform(y)
+X_scaled = np.concatenate(
+    [np.ones((X_scaled.shape[0], 1), dtype=X_scaled.dtype), X_scaled], 
+    axis = 1)
 
 # %% get adjacency 
 
@@ -65,14 +70,14 @@ n = Q_scaled.shape[0]
 # %% define generative model
 
 lambda_rho = 0.001
-prior, likelihood, _ = bym2_sim.BYM2_simulators(Lambda_scaled,
-                                             A_scaled, A_scaled, lambda_rho, p,
-                                             rng = rng,
-                                             corrupt_residual = False,
-                                             beta_noise_sd = 1.0,
-                                             beta_loc = 0.0,
-                                             beta_sd = beta_prior_sd,
-                                             fix_X = True, X = X_scaled)
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
+    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
+    rng = rng,
+    corrupt_residual = False,
+    beta_loc = 0.0,
+    beta_sd = beta_prior_sd,
+    sigma2_sd = sigma2_prior_sd,
+    fix_X = True, X = X_scaled)
 simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
@@ -80,7 +85,7 @@ simulator = bf.simulators.SequentialSimulator([
 
 # sample from joint distribution
 data = simulator.sample(50)
-print("Data:", data)
+#print("Data:", data)
 print("Shapes:", {k: v.shape for k, v in data.items()})
 
 
@@ -101,8 +106,9 @@ beta_summary_net = summary_networks.SummaryGNN(
     gnn_dim = 32,
     compress_dim = 256,
     hidden_dim = 64,
-    summary_dim = 16)
+    summary_dim = 32)
 """
+
 beta_summary_net = summary_networks.SummaryIdentity()
 
 # %% define inference network and amortizer for fixed effects
@@ -144,9 +150,9 @@ beta_checkpoint = keras.callbacks.ModelCheckpoint(
 
 history = beta_workflow.fit_online(epochs = 300, 
                               batch_size = 64,
-                              iterations_per_epoch = 1000,
+                              num_batches_per_epoch = 100,
                               validation_data = 64,
-                              callbacks = [bayesflow_helpers.CleanLRLogger(),
+                              callbacks = [bfhelp.CleanLRLogger(),
                                            beta_checkpoint],
                               checkpoint_path = "checkpoints")
 bf.diagnostics.plots.loss(history)
@@ -160,46 +166,12 @@ beta_workflow.approximator.save(filepath=beta_output_fp)
 
 beta_approximator = keras.saving.load_model(beta_output_fp)
 
-"""
-# %%
-
-beta_lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=2.5e-5,
-    decay_steps=250,
-    decay_rate=0.9,
-    staircase=True # If True, LR drops in "steps"; if False, it's a smooth curve
-)
-beta_optimizer = keras.optimizers.Adam(learning_rate = beta_lr_schedule)
-beta_workflow = bf.BasicWorkflow(
-    simulator=simulator,
-    adapter=beta_adapter,
-    inference_network=beta_approximator.inference_network,
-    optimizer = beta_optimizer,
-    summary_network=beta_approximator.summary_network,
-    standardize=["inference_variables"]
-)
-beta_workflow.approximator.compile(optimizer = beta_optimizer)
-
-# %%
-
-history = beta_workflow.fit_online(
-    epochs = 50, 
-    batch_size = 64,
-    iterations_per_epoch = 1000,
-    validation_data = 64,
-    callbacks = [bayesflow_helpers.CleanLRLogger()],
-    standardize = ['inference_variables']
-)
-
-"""
-
 # %% check diagnostics
 
 num_samples = 5000
-val_sims = simulator.sample(200)
+val_sims = simulator.sample(500)
 post_draws = beta_approximator.sample(conditions=val_sims, num_samples=num_samples,
-                                      batch_size = 1)
-post_draws.keys()
+                                      batch_size = 5)
 
 par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
 f = bf.diagnostics.plots.pairs_posterior(
@@ -227,19 +199,22 @@ f.savefig(output_dir + "beta_calibration.png")
 
 # %% incorporate beta network post sd into simulated corrupted residuals
 
-beta_postsd = np.std(post_draws['beta'], axis = 1)
-beta_avgpostsd = np.mean(beta_postsd, axis = 0)
-beta_noise_sd = beta_avgpostsd
+post_draws.keys()
+beta_draws = post_draws['beta']
+beta_postcov = np.stack([np.cov(beta_draws[b].T) for b in range(beta_draws.shape[0])])
+beta_noise_cov = beta_postcov.mean(axis=0)
+beta_noise_R = np.linalg.cholesky(beta_noise_cov, upper = False)
 
-prior, likelihood, _ = bym2_sim.BYM2_simulators(Lambda_scaled,
-                                             A_scaled, A_scaled, lambda_rho, p,
-                                             rng = rng,
-                                             corrupt_residual = True,
-                                             beta_loc = 0.0,
-                                             beta_sd = beta_prior_sd,
-                                             beta_noise_sd = beta_noise_sd,
-                                             fix_X = True, X = X_scaled)
-simulator = bf.simulators.SequentialSimulator([
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
+    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
+    rng = rng,
+    corrupt_residual = True,
+    beta_loc = 0.0,
+    beta_sd = beta_prior_sd,
+    beta_noise_R = beta_noise_R,
+    sigma2_sd = sigma2_prior_sd,
+    fix_X = True, X = X_scaled)
+var_simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
 ])
@@ -254,23 +229,13 @@ var_adapter = (
     # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
 )
 
-"""
-# Graph neural network as summary network (spatial data not row-exchangeable)
 var_summary_net = summary_networks.SummaryGNN(
     adjacency_matrix = W_full,
     gnn_dim = 32,
     compress_dim = 128,
     hidden_dim = 64,
     summary_dim = 32)
-"""
-
 #var_summary_net = summary_networks.SummaryIdentity()
-var_summary_net = summary_networks.SummaryGNN(
-    adjacency_matrix = W_full,
-    gnn_dim = 32,
-    compress_dim = 128,
-    hidden_dim = 64,
-    summary_dim = 32)
 
 # %% define var inference network and amortizer
 
@@ -290,7 +255,7 @@ var_inference_net = bf.networks.CouplingFlow(
 # %% define var workflow, combining summary and inference network into approximator
 
 var_workflow = bf.BasicWorkflow(
-    simulator=simulator,
+    simulator=var_simulator,
     adapter=var_adapter,
     inference_network=var_inference_net,
     summary_network=var_summary_net,
@@ -299,6 +264,7 @@ var_workflow = bf.BasicWorkflow(
 
 # %% define var optimizer
 
+"""
 # Define a schedule: Start at 5e-4, reduce by 10% every 1000 steps
 var_lr_schedule = keras.optimizers.schedules.ExponentialDecay(
     initial_learning_rate=5e-4, 
@@ -306,6 +272,8 @@ var_lr_schedule = keras.optimizers.schedules.ExponentialDecay(
     decay_rate=0.99,
     staircase=True
 )
+var_optimizer = keras.optimizers.Adam(learning_rate=var_lr_schedule)
+"""
 
 var_checkpoint = keras.callbacks.ModelCheckpoint(
     filepath= 'checkpoints/' + model_name + '_var.weights.h5',
@@ -314,16 +282,14 @@ var_checkpoint = keras.callbacks.ModelCheckpoint(
     save_weights_only=True
 )
 
-var_optimizer = keras.optimizers.Adam(learning_rate=var_lr_schedule)
-
 # %% start training variance network!
 
 history = var_workflow.fit_online(epochs = 150, 
                                   batch_size = 64,
-                                  iterations_per_epoch = 1000,
+                                  num_batches_per_epoch = 100,
                                   validation_data = 64,
-                                  optimizer = var_optimizer,
-                                  callbacks = [bayesflow_helpers.CleanLRLogger(),
+                                  #optimizer = var_optimizer,
+                                  callbacks = [bfhelp.CleanLRLogger(),
                                                var_checkpoint],
                                   checkpoint_path = "checkpoints")
 
@@ -344,7 +310,9 @@ bf.diagnostics.plots.loss(history)
 
 num_samples = 5000
 val_sims = simulator.sample(200)
-post_draws = var_approximator.sample(conditions=val_sims, num_samples=num_samples)
+post_draws = var_approximator.sample(conditions=val_sims,
+                                     num_samples=num_samples,
+                                     batch_size = 1)
 post_draws.keys()
 
 # %% plot posterior samples for first dataset
@@ -383,7 +351,7 @@ data = simulator.sample(300)
 
 # %% chain samples
 
-post_draws = bayesflow_helpers.simulateChainSamples(
+post_draws = bfhelp.simulate_chain_samples(
     n_samples, data, X_scaled, beta_approximator, var_approximator,
     var_batch_size = 10)
 

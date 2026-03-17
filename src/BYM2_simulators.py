@@ -6,6 +6,7 @@ Created on Sat Feb 28 20:26:54 2026
 @author: 
 """
 
+import src.bayesflow_helpers as bfhelp
 import numpy as np
 
 def CAR_prior(n_samples: int,
@@ -35,9 +36,7 @@ def CAR_prior(n_samples: int,
     """
     if A.shape[0] != A.shape[1]:
         raise AttributeError("A must be square")
-    x = rng.normal(size = (n_samples, A.shape[0]))
-    x = x @ A.transpose()
-    return x
+    return rng.standard_normal(size = (n_samples, A.shape[0])) @ A.T
 
 def rho_KLD(rho: float,
             Lambda: np.array,
@@ -65,45 +64,42 @@ def rho_KLD(rho: float,
         Kullback-Leiber divergence term for penalized-complexity prior on rho.
 
     """
-    if (check_rho):
-        if (rho < 0 or rho > 1):
+    if check_rho and not (0 <= rho <= 1):
             raise ValueError("rho must be in [0,1]")
     n = Lambda.size
-    kld = -n * rho / 2.0
-    kld += np.sum(rho / Lambda) / 2.0
-    kld -= np.sum(np.log(rho / Lambda + (1 - rho))) / 2.0
-    return kld
+    rho_over_Lambda = rho / Lambda
+    kld = -n * rho
+    kld += rho_over_Lambda.sum()
+    kld -= np.sum(np.log(rho_over_Lambda + (1.0 - rho)))
+    return kld * 0.5
     
 
 def PC_prior(n_samples, lambda_rho, Lambda, rng):
     #rng = np.random.default_rng(seed = seed)
-    rho_samples = np.zeros(n_samples)
-    proposed_samples = np.zeros(n_samples)
+    rho_samples = np.empty(n_samples, dtype = np.float32)
+    proposed_samples = np.empty(n_samples, dtype = np.float32)
     for i in range(0, n_samples):
-        accept = False
-        rho_star = rng.uniform()
-        current_samples = 1
-        while accept == False:
-            kld = rho_KLD(rho_star, Lambda)
-            d = np.sqrt(2.0 * kld)
+        n_proposed = 1
+        while True:
+            rho_star = rng.uniform()
+            d = np.sqrt(2.0 * rho_KLD(rho_star, Lambda))
             accept_logprob = -lambda_rho * d
             logu = np.log(rng.uniform())
             if logu <= accept_logprob:
-                accept = True
-            else: 
-                rho_star = rng.uniform()
-                current_samples += 1
+                break
+            n_proposed += 1
         rho_samples[i] = rho_star
-        proposed_samples[i] = current_samples
+        proposed_samples[i] = n_proposed
     return rho_samples, proposed_samples
     
-def BYM2_prior(n_samples,
-               p,
-               Lambda,
-               lambda_rho, 
-               beta_loc = 0.0,
-               beta_sd = 1.0,
-               beta_noise_sd = 1.0,
+def BYM2_prior(n_samples: int,
+               p: int,
+               Lambda: np.array,
+               lambda_rho: float, 
+               beta_loc: float = 0.0,
+               beta_sd: float = 1.0,
+               beta_noise_R: np.array = None,
+               sigma2_sd: float = 1.0,
                rng = np.random.default_rng()):
     # Lambda: 1D array of eigenvalues of spatial precision matrix
     # lambda_rho: PC penalty parameter for spatial variance proportion
@@ -112,38 +108,41 @@ def BYM2_prior(n_samples,
     # IG prior on sigma2
     #sigma2 = np.reciprocal(rng.gamma(shape = a0, scale = 1.0 / b0))
     # half normal prior on sigma2
-    sigma2 = np.abs(rng.normal(loc = 0.0, scale = 1.0, size = n_samples))
+    sigma2 = np.abs(rng.normal(loc = 0.0, scale = sigma2_sd, size = n_samples))
     # normal prior on fixed effects
     beta = rng.normal(loc = beta_loc, scale = beta_sd, 
                       size = (n_samples, p + 1))
-    beta_corrupted = beta + rng.normal(loc = 0.0, scale = beta_noise_sd, 
-                      size = (n_samples, p + 1))
+    beta_signlog = bfhelp.signed_log(beta)
+    beta_arcsinh = np.arcsinh(beta)
+    if beta_noise_R is None:
+        beta_noise_R = np.eye(p + 1)
+    beta_corrupted = beta + rng.standard_normal(size = beta.shape) @ beta_noise_R
     rho, proposed_samples = PC_prior(n_samples, lambda_rho, Lambda, rng)
-    return dict(beta = beta, beta_corrupted = beta_corrupted,
+    return dict(beta = beta,
+                beta_corrupted = beta_corrupted,
                 log_sigma2 = np.log(sigma2), 
-                logit_rho = np.log(rho / (1 - rho)))
+                beta_signlog = beta_signlog,
+                beta_arcsinh = beta_arcsinh,
+                logit_rho = np.log(rho / (1.0 - rho)))
 
 def generate_CAR_covariates(n_samples, n, p, A_x, rng):
-    X = np.zeros((n_samples, n, p))
+    X = np.empty((n_samples, n, p + 1), dtype = np.float32)
+    X[:,:,0] = 1.0
     # generate covariates using conditional regressions
-    for i in range(0, p):
-        if (i == 0):
-            linear_combo = np.zeros(shape = [n_samples, n])
+    for i in range(1, p + 1):
+        if (i == 1):
+            linear_combo = 0.0
         else:
-            weights = rng.normal(loc = 0.0, scale = 1.0, size = [n_samples, i])    
-            linear_combo = np.einsum('bij,bj->bi', X[:,:,:i], weights)
-        noise = CAR_prior(n_samples, A_x, rng)
-        X[:,:,i] = linear_combo + noise
+            weights = rng.standard_normal(size = [n_samples, i - 1])    
+            linear_combo = (X[:,:,1:i] @ weights[:,:, np.newaxis]).squeeze(-1)
+        X[:,:,i] = linear_combo + CAR_prior(n_samples, A_x, rng)
     return X
     
 def BYM2_likelihood(n_samples, beta, beta_corrupted,
                     log_sigma2, logit_rho, Lambda, A_y, A_x,
                     X_fixed = None, # fixes X for all samples if input
                     corrupt_residual = True,
-                    rng = np.random.default_rng()):
-                    #simulate_missing = True,
-                    #missing_covariates_prob = 0.0,
-                    #missing_response_prob = 0.0):
+                    rng = np.random.default_rng(), **kwargs):
     # beta: 1D array of regression coefficients (including intercept)
     # sigma2: total error variance
     # rho: spatial proportion of variance
@@ -155,53 +154,40 @@ def BYM2_likelihood(n_samples, beta, beta_corrupted,
     n = Lambda.size
     p = beta.shape[-1] - 1
     if (X_fixed is None):
+        # (batch_size, n, p + 1)
         X = generate_CAR_covariates(n_samples, n, p, A_x, rng)
-    else:
-        X = np.repeat(X_fixed[np.newaxis, ...], repeats = n_samples, axis = 0)
-    # first compute mu = E[y | X, beta]
-    mu = np.repeat(beta[:,0][:, np.newaxis], n, axis = 1)
-    mu += np.einsum('bij,bj->bi', X, beta[:,1:])
+        # (batch_size, n)
+        mu = (X @ beta[:,:,np.newaxis]).squeeze(-1)
+        if corrupt_residual:
+            mu_corrupted = (X @ beta_corrupted[:, :, np.newaxis]).squeeze(-1)
+    else:      
+        # X has shape (n, p + 1)
+        X = np.broadcast_to(X_fixed, (n_samples, *X_fixed.shape))
+        # (batch_size, n)
+        mu = beta @ X_fixed.T
+        if corrupt_residual:
+            mu_corrupted = beta_corrupted @ X_fixed.T
+    # Scale factors — (B,) broadcast over (batch_size, n) via newaxis
+    scale_s = np.sqrt(sigma2 * rho)[:, np.newaxis]          # (B, 1)
+    scale_e = np.sqrt(sigma2 * (1.0 - rho))[:, np.newaxis]  # (B, 1)
     # compute latent spatial effects gamma with CAR prior
-    gamma = CAR_prior(n_samples, A_y, rng)
-    gamma = np.einsum('bi,b->bi', gamma, np.sqrt(sigma2 * rho))
-    # compute non-spatial error term
-    eta = rng.normal(loc = 0.0, scale = 1.0, size = (n_samples, n))
-    eta = np.einsum('bi,b->bi', eta, np.sqrt(sigma2 * (1.0 - rho)))
-    # add in error terms
-    y = mu + gamma + eta
-    # reshape to 2D array
-    y = y[:,:,np.newaxis]
-    mu = mu[:,:,np.newaxis]
+    gamma = CAR_prior(n_samples, A_y, rng) * scale_s        # (B, N)
+    eta   = rng.standard_normal((n_samples, n)) * scale_e   # (B, N)
+    # add in error terms and reshape to 3D array
+    y = (mu + gamma + eta)[:,:,np.newaxis]                  # (B, N, 1)
     if corrupt_residual:
-        mu_corrupted = np.repeat(beta_corrupted[:,0][:, np.newaxis], n, axis = 1)
-        mu_corrupted += np.einsum('bij,bj->bi', X, beta_corrupted[:,1:])
-        mu_corrupted = mu_corrupted[:,:,np.newaxis]
-        r = y - mu_corrupted
+        r = y - mu_corrupted[:,:,np.newaxis]
     else:
-        r = y - mu
-    """
-    # mask covariates and response randomly
-    X_mask = rng.uniform(size = X.shape) < missing_covariates_prob
-    X[X_mask] = -9001
-    y_mask = rng.uniform(size = y.shape) < missing_response_prob
-    y[y_mask] = -9001
-    # convert masks to integer indices
-    X_mask = X_mask.astype('int')
-    y_mask = y_mask.astype('int')
-    return dict(X = X, X_mask = X_mask, y = y, y_mask = y_mask,
-                mu = mu,
-                r = r)
-    """
+        r = y - mu[:,:,np.newaxis]
     return dict(X = X, y = y, r = r)
 
 def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
                     rng = np.random.default_rng(),
                     corrupt_residual = False,
-                    beta_noise_sd = 1.0,
-                    #simulate_missing = True,
-                    #missing_covariates_prob = 0.0,
-                    #missing_response_prob = 0.0,
-                    beta_loc = 0.0, beta_sd = 10.0,
+                    beta_noise_R = None,
+                    beta_loc = 0.0,
+                    beta_sd = 10.0,
+                    sigma2_sd = 10.0,
                     fix_X = False, X = None):
     n = Lambda.size
     if fix_X and X is None:
@@ -209,7 +195,8 @@ def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
     def prior(batch_size):
         res = BYM2_prior(batch_size[0], p, Lambda, lambda_rho,
                          beta_loc = beta_loc, beta_sd = beta_sd,
-                         beta_noise_sd = beta_noise_sd,
+                         beta_noise_R = beta_noise_R,
+                         sigma2_sd = sigma2_sd,
                          rng = rng)
         return res
     def likelihood(batch_size, beta, beta_corrupted, log_sigma2, logit_rho):
@@ -226,10 +213,10 @@ if __name__ == "__main__":
     import shp_reader
     import matplotlib.pyplot as plt
     # set filepath to US county shapefile
-    print("Reading in US county shapefile...")
+    print("Reading in CA county shapefile...")
     fp = "../data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
     # read in shapefile and adjancency matrix of mainland US counties
-    us_mainland, W = shp_reader.read_US_shapefile(fp)
+    us_mainland, W = shp_reader.read_CA_shapefile(fp)
     print("Done! Constructing CAR covariance matrix using US county map...")
     # convert contiguity object to dense matrix
     W_full = W.full()[0]
@@ -264,20 +251,19 @@ if __name__ == "__main__":
     lambda_rho = 0.003
     prior, likelihood, fix_X = BYM2_simulators(Lambda_scaled, A_scaled, 
                                                A_scaled, lambda_rho, p,
-                                               rng, True, 0.0, 0.0)
+                                               rng)
     params = prior(n_samples)
     print(params)
     print("Simulating from BYM2 likelihood using sampled parameters...")
     data = likelihood(n_samples,
-                      params["beta"], params["log_sigma2"], params["logit_rho"])
-    print("Proportion of missing covariates:", np.mean(data["X_mask"]))
-    print("Proportion of missing responses:", np.mean(data["y_mask"]))
+                      params["beta"], 
+                      params["beta_corrupted"],
+                      params["log_sigma2"],
+                      params["logit_rho"])
     print(data)
     # plot first dataset
-    y_masked = data["y"][1,:].copy()
-    y_masked[data["y_mask"][1,:].astype("bool")] = np.nan
-    us_mainland["y"] = y_masked
+    ca_shp = us_mainland.query("STATEFP == '06'")
+    us_mainland["y"] = data["y"][0,:,:]
     us_mainland.plot(column = "y", legend = True)
     plt.title("Simulated Response")
-    
     

@@ -8,6 +8,8 @@ Created on Sat Feb 28 20:26:54 2026
 
 import src.bayesflow_helpers as bfhelp
 import numpy as np
+from scipy.special import expit, logit
+from scipy.linalg import solve_triangular
 
 def CAR_prior(n_samples: int,
               A: np.array,
@@ -74,10 +76,11 @@ def rho_KLD(rho: float,
     return kld * 0.5
     
 
-def PC_prior(n_samples, lambda_rho, Lambda, rng):
-    #rng = np.random.default_rng(seed = seed)
-    rho_samples = np.empty(n_samples, dtype = np.float32)
-    proposed_samples = np.empty(n_samples, dtype = np.float32)
+def PC_prior(n_samples, lambda_rho, Lambda, rng = None):
+    if rng is None:
+        rng = np.random.default_rng()
+    rho_samples = np.empty(n_samples)
+    proposed_samples = np.empty(n_samples)
     for i in range(0, n_samples):
         n_proposed = 1
         while True:
@@ -97,36 +100,54 @@ def BYM2_prior(n_samples: int,
                Lambda: np.array,
                lambda_rho: float, 
                beta_loc: float = 0.0,
-               beta_sd: float = 1.0,
+               tau_beta: float = 1.0,
                beta_noise_R: np.array = None,
                sigma2_sd: float = 1.0,
-               rng = np.random.default_rng()):
+               R_x: np.array = None,
+               theta_isotropic: bool = False,
+               rng = None):
     # Lambda: 1D array of eigenvalues of spatial precision matrix
     # lambda_rho: PC penalty parameter for spatial variance proportion
     # p: number of predictors (beta will include p + 1 columns with intercept)
-    
+    if rng is None:
+        rng = np.random.default_rng()
+    if R_x is None:
+        R_x = np.eye(p + 1)
     # IG prior on sigma2
     #sigma2 = np.reciprocal(rng.gamma(shape = a0, scale = 1.0 / b0))
     # half normal prior on sigma2
-    sigma2 = np.abs(rng.normal(loc = 0.0, scale = sigma2_sd, size = n_samples))
-    # normal prior on fixed effects
-    beta = rng.normal(loc = beta_loc, scale = beta_sd, 
-                      size = (n_samples, p + 1))
+    sigma2 = np.maximum(np.abs(rng.normal(loc = 0.0, scale = sigma2_sd, size = n_samples)),
+                        1e-10)
+    if theta_isotropic:
+        # beta ~ N_p(Rm_0, tau^2 sigma^2(X^{\T}X)^{-1})
+        theta = rng.normal(loc = beta_loc,
+                          scale = tau_beta * np.sqrt(sigma2[:, np.newaxis]), 
+                          size = (n_samples, p + 1))
+        beta = solve_triangular(R_x, theta.T, lower = False).T
+    else:
+        # beta ~ N_p(m_0, tau^2 sigma^2)
+        beta = rng.normal(loc = beta_loc,
+                          scale = tau_beta * np.sqrt(sigma2[:, np.newaxis]), 
+                          size = (n_samples, p + 1))
+        theta = beta @ R_x.T
     beta_signlog = bfhelp.signed_log(beta)
     beta_arcsinh = np.arcsinh(beta)
     if beta_noise_R is None:
-        beta_noise_R = np.eye(p + 1)
-    beta_corrupted = beta + rng.standard_normal(size = beta.shape) @ beta_noise_R
+        beta_corrupted = beta + rng.standard_normal(size = beta.shape)
+    else:
+        beta_corrupted = beta + rng.standard_normal(size = beta.shape) @ beta_noise_R
+
     rho, proposed_samples = PC_prior(n_samples, lambda_rho, Lambda, rng)
     return dict(beta = beta,
+                theta = theta,
                 beta_corrupted = beta_corrupted,
                 log_sigma2 = np.log(sigma2), 
                 beta_signlog = beta_signlog,
                 beta_arcsinh = beta_arcsinh,
-                logit_rho = np.log(rho / (1.0 - rho)))
+                logit_rho = logit(rho))
 
 def generate_CAR_covariates(n_samples, n, p, A_x, rng):
-    X = np.empty((n_samples, n, p + 1), dtype = np.float32)
+    X = np.empty((n_samples, n, p + 1))
     X[:,:,0] = 1.0
     # generate covariates using conditional regressions
     for i in range(1, p + 1):
@@ -134,7 +155,7 @@ def generate_CAR_covariates(n_samples, n, p, A_x, rng):
             linear_combo = 0.0
         else:
             weights = rng.standard_normal(size = [n_samples, i - 1])    
-            linear_combo = (X[:,:,1:i] @ weights[:,:, np.newaxis]).squeeze(-1)
+            linear_combo = (X[:,:,1:i] @ weights[:,:, np.newaxis]).squeeze(axis = -1)
         X[:,:,i] = linear_combo + CAR_prior(n_samples, A_x, rng)
     return X
     
@@ -142,15 +163,17 @@ def BYM2_likelihood(n_samples, beta, beta_corrupted,
                     log_sigma2, logit_rho, Lambda, A_y, A_x,
                     X_fixed = None, # fixes X for all samples if input
                     corrupt_residual = True,
-                    rng = np.random.default_rng(), **kwargs):
+                    rng = None, **kwargs):
     # beta: 1D array of regression coefficients (including intercept)
     # sigma2: total error variance
     # rho: spatial proportion of variance
     # Lambda: 1D array of eigenvalues of CAR precision matrix Q
     # A_y: 2D matrix, factor of response spatial covariance Q^{-1} = A_y A^{t}_y
     # A_x: 2D matrix, factor of response spatial covariance Q^{-1} = A_x A^{t}_x
+    if rng is None:
+        rng = np.random.default_rng()
     sigma2 = np.exp(log_sigma2)
-    rho = 1.0 / (1.0 + np.exp(-logit_rho))
+    rho = expit(logit_rho)
     n = Lambda.size
     p = beta.shape[-1] - 1
     if (X_fixed is None):
@@ -186,27 +209,31 @@ def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
                     corrupt_residual = False,
                     beta_noise_R = None,
                     beta_loc = 0.0,
-                    beta_sd = 10.0,
+                    tau_beta = 10.0,
                     sigma2_sd = 10.0,
-                    fix_X = False, X = None):
+                    fix_X = False,
+                    X = None,
+                    R_x = None,
+                    theta_isotropic = False):
     n = Lambda.size
     if fix_X and X is None:
-        X = generate_CAR_covariates(1, n, p, A_x, rng).squeeze()
+        X = generate_CAR_covariates(1, n, p, A_x, rng).squeeze(axis=0)        
     def prior(batch_size):
-        res = BYM2_prior(batch_size[0], p, Lambda, lambda_rho,
-                         beta_loc = beta_loc, beta_sd = beta_sd,
-                         beta_noise_R = beta_noise_R,
-                         sigma2_sd = sigma2_sd,
-                         rng = rng)
-        return res
+        return BYM2_prior(batch_size[0], p, Lambda, lambda_rho,
+                          beta_loc = beta_loc, tau_beta = tau_beta,
+                          beta_noise_R = beta_noise_R,
+                          sigma2_sd = sigma2_sd,
+                          R_x = R_x, theta_isotropic = theta_isotropic,
+                          rng = rng)
+
     def likelihood(batch_size, beta, beta_corrupted, log_sigma2, logit_rho):
-        res = BYM2_likelihood(batch_size[0], beta, beta_corrupted,
-                              log_sigma2, logit_rho,
-                              Lambda, A_y, A_x,
-                              X_fixed = X, 
-                              corrupt_residual = corrupt_residual,
-                              rng = rng)
-        return res
+        return BYM2_likelihood(batch_size[0], beta, beta_corrupted,
+                               log_sigma2, logit_rho,
+                               Lambda, A_y, A_x,
+                               X_fixed = X, 
+                               corrupt_residual = corrupt_residual,
+                               rng = rng)
+        
     return prior, likelihood, X
 
 if __name__ == "__main__":

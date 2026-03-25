@@ -7,6 +7,7 @@ import bayesflow as bf
 import matplotlib.pyplot as plt
 from typing import Callable
 import tqdm
+from scipy.linalg import solve_triangular
 
 def signed_log(x):
     out = np.sign(x) * np.log1p(np.abs(x))
@@ -91,10 +92,29 @@ def plot_sim_samples(draws, truth, backtransform, label="parameter"):
                 linestyle='--', label='95% CI (upper)')
     plt.legend()
     
+def backtransform_beta_samps(samps: dict, R_x = None):
+    if 'beta' in samps:
+        beta_draws = samps['beta']
+    elif 'beta_signlog' in samps:
+        beta_draws = inverse_signed_log(samps['beta_signlog'])
+    elif 'beta_arcsinh' in samps:
+        beta_draws = np.sinh(samps['beta_arcsinh'])
+    elif 'theta' in samps:
+        if R_x is None:
+            raise ValueError("R_x must be supplied for backtransformation of theta")
+        batch_size, n_samples, p_plus_1 = samps['theta'].shape
+        theta = samps['theta'].reshape(-1, p_plus_1).T
+        beta_draws = solve_triangular(R_x, theta, lower = False).T.reshape(
+            batch_size, n_samples, p_plus_1)
+    else:
+        raise AttributeError("beta samples from approximator not recognized")
+    return beta_draws
+    
 def simulate_network_residuals(n_samples: int,
                                y: np.array,
                                X: np.array,
                                beta_approx: bf.ContinuousApproximator,
+                               R_x = None,
                                **kwargs):
     """
     
@@ -130,14 +150,7 @@ def simulate_network_residuals(n_samples: int,
     with SilentSampling():
         beta_samps = beta_approx.sample(conditions = dict(y = y),
                                         num_samples = n_samples)
-    if 'beta' in beta_samps:
-        beta_draws = beta_samps['beta']
-    elif 'beta_signlog' in beta_samps:
-        beta_draws = inverse_signed_log(beta_samps['beta_signlog'])
-    elif 'beta_arcsinh' in beta_samps:
-        beta_draws = np.sinh(beta_samps['beta_arcsinh'])
-    else:
-        raise AttributeError("beta samples from approximator not recognized")
+    beta_draws = backtransform_beta_samps(beta_samps, R_x = R_x)
     # beta_draws shape : (batch_size, n_samples, p + 1)
     # X shape : (batch_size, n, p + 1)
     batch_size, n, _ = X.shape
@@ -161,7 +174,7 @@ def ancestral_residual_simulator(prior: Callable,
     ])
     
 def simulate_chain_samples(n_samples, data, X, beta_approx, var_approx,
-                         var_batch_size = 10):
+                         var_batch_size = 10, R_x = None):
     """
     Function for obtaining samples from chained BYM2 networks.
     Can be quite memory-intensive if n is large and number of batches is large!
@@ -198,14 +211,7 @@ def simulate_chain_samples(n_samples, data, X, beta_approx, var_approx,
     batches = data["y"].shape[0]
     # (batch_size, n_samples, p + 1)
     beta_samps = beta_approx.sample(conditions = data, num_samples = n_samples)
-    if 'beta' in beta_samps.keys():
-        beta_draws = beta_samps['beta']
-    elif 'beta_signlog' in beta_samps.keys():
-        beta_draws = inverse_signed_log(beta_samps['beta_signlog'])
-    elif 'beta_arcsinh' in beta_samps.keys():
-        beta_draws = np.sinh(beta_samps['beta_arcsinh'])
-    else:
-        raise AttributeError("beta samples from approximator not recognized")
+    beta_draws = backtransform_beta_samps(beta_samps, R_x = R_x)
     # (batch_size, n_samples, n)
     y_flat = np.repeat(data['y'], repeats = n_samples, axis = 0)
     mu_flat = (beta_draws @ X.T).reshape(batches * n_samples, X.shape[0], 1)

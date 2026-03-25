@@ -1,1 +1,36 @@
-#!/usr/bin/env python3# -*- coding: utf-8 -*-import numpy as npdef scaled_CAR(adj: np.array):    """    Parameters    ----------    adj : 2D array        dense adjacency matrix    Returns    -------    Q_scaled: CAR precision matrix, Q^{-1} = (D - 0.99 * W_{adj})^{-1}    Sigma_scaled: CAR covariance matrix, Q^{-1} = \Sigma    Lambda_scaled: 1D array of eigenvalues of precision matrix    A_scaled: asymmetric matrix factor A such that Q^{-1} = AA^{T}    """    D = np.diag(np.sum(adj, axis=1))    Q = D - 0.99 * adj    # Eigendecomposition (Q = P * diag(Lambda) * P^{T})    Lambda, P = np.linalg.eig(Q)    # A = P * Lambda^{-1/2}    # Q^{-1} = AA^{T}    A = P @ np.diag(np.pow(Lambda, -0.5))    Sigma = A @ A.transpose()    scaling_factor = np.exp(np.mean(np.log(Sigma.diagonal())))    Q_scaled = scaling_factor * Q    Sigma_scaled = (1.0 / scaling_factor) * Sigma    A_scaled = np.pow(scaling_factor, -0.5) * A    Lambda_scaled = Lambda * scaling_factor        return Q_scaled, Sigma_scaled, Lambda_scaled, A_scaled
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import numpy as np
+
+def scaled_CAR(adj: np.array):
+    """
+
+    Parameters
+    ----------
+    adj : 2D array
+        dense adjacency matrix
+
+    Returns
+    -------
+    Q_scaled: CAR precision matrix, Q^{-1} = (D - 0.99 * W_{adj})^{-1}
+    Sigma_scaled: CAR covariance matrix, Q^{-1} = \Sigma
+    Lambda_scaled: 1D array of eigenvalues of precision matrix
+    A_scaled: asymmetric matrix factor A such that Q^{-1} = AA^{T}
+
+    """
+    D = np.diag(np.sum(adj, axis=1))
+    Q = D - 0.99 * adj
+    # Eigendecomposition (Q = P * diag(Lambda) * P^{T})
+    Lambda, P = np.linalg.eigh(Q)
+    # A = P * Lambda^{-1/2}
+    # Q^{-1} = AA^{T}
+    A = P @ np.diag(np.pow(Lambda, -0.5))
+    Sigma = A @ A.transpose()
+    scaling_factor = np.exp(np.mean(np.log(Sigma.diagonal())))
+    Q_scaled = scaling_factor * Q
+    Sigma_scaled = (1.0 / scaling_factor) * Sigma
+    A_scaled = np.pow(scaling_factor, -0.5) * A
+    Lambda_scaled = Lambda * scaling_factor
+    
+    return Q_scaled, Sigma_scaled, Lambda_scaled, A_scaled

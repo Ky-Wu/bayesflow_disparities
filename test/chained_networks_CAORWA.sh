@@ -22,6 +22,7 @@ FIX_X="True"
 MODEL_NAME="westcoast_fixedXp7"
 LAMBDA_RHO="0.03"
 CORRUPT_RESIDUAL="True"
+THETA_ISOTROPIC="True"
 OUTPUT_DIR="output/CAORWA_chained_sim/"
 
 # 3. Safety Check
@@ -45,4 +46,5 @@ python -u -m src.sim_chained_networks \
     "$MODEL_NAME" \
     "$LAMBDA_RHO" \
     "$CORRUPT_RESIDUAL" \
+    "$THETA_ISOTROPIC" \
     "$OUTPUT_DIR"

@@ -66,7 +66,8 @@ prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(Lambda_scaled,
                                              rng = rng,
                                              corrupt_residual = False,
                                              beta_noise_sd = 1.0,
-                                             beta_loc = 0.0, beta_sd = 5.0,
+                                             beta_loc = 0.0,
+                                             beta_sd = 10.0,
                                              fix_X = fix_X)
 simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
@@ -85,7 +86,7 @@ adapter = (
     # .as_set(["X", "y", "X_mask", "y_mask"])
     .as_set(["y"])
     .convert_dtype("float64", "float32")
-    .concatenate(["beta", "log_sigma2", "logit_rho"], into="inference_variables")
+    .concatenate(["beta_signlog", "log_sigma2", "logit_rho"], into="inference_variables")
     .concatenate(["y"], into="summary_variables")
     # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
 )
@@ -163,7 +164,7 @@ post_draws.keys()
 
 # %% plot posterior samples for first dataset
 
-par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
+par_names = [rf"$\text{{sgnlog}}(\beta_{{{i}}})$" for i in range(p + 1)]
 par_names += r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 

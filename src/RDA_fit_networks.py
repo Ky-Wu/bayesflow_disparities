@@ -11,7 +11,6 @@ import jax
 import os
 jax.config.update("jax_enable_x64", False)
 os.environ["KERAS_BACKEND"] = "jax"
-os.environ['JAX_PLATFORMS'] = 'cpu'
 import bayesflow as bf
 import keras
 from src import summary_networks
@@ -28,12 +27,11 @@ from libpysal.weights import Rook
 shp_fp = "data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
 data_fp = "output/RDA/data_cleaned.csv"
 model_name = "US_lungcancer"
-output_dir = "output/RDA/"
-beta_output_fp = Path("checkpoints") / (model_name + "_beta_net.keras")
-var_fp = Path("checkpoints") /  (model_name + "_var_net.keras")
-beta_prior_sd = np.sqrt(10.0)
-sigma2_prior_sd = np.sqrt(10.0)
+output_dir = "output/RDA/v1b/"
+beta_output_fp = Path("checkpoints") / (model_name + "_beta_net_v1b.keras")
+var_fp = Path("checkpoints") /  (model_name + "_var_net_v1b.keras")
 rng = np.random.default_rng(seed = 1130)
+
 
 # %% load in shapefile and cleaned data from RDA_data_setup.py
 
@@ -60,12 +58,27 @@ X_scaled = np.concatenate(
     [np.ones((X_scaled.shape[0], 1), dtype=X_scaled.dtype), X_scaled], 
     axis = 1)
 
+# %% QR decomposition
+
+Q_x, R_x = np.linalg.qr(X_scaled, mode = 'reduced')
+np.save("checkpoints/US_lungcancer_Qx.npy", Q_x)
+np.save("checkpoints/US_lungcancer_Rx.npy", R_x)
+
 # %% get adjacency 
 
 W = Rook.from_dataframe(data_shp, use_index = False)
 W_full = W.full()[0]
 Q_scaled, Sigma_scaled, Lambda_scaled, A_scaled = scaled_CAR(W_full)
 n = Q_scaled.shape[0]
+
+# %% prior hyperparameters
+
+# previous models show tau_beta = n or tau_beta = n/(p+1) result in significant
+# error for small effects
+# zellner-g prior settings
+tau_beta = np.sqrt(n / 10.0)
+sigma2_prior_sd = np.sqrt(1.0)
+theta_isotropic = True
 
 # %% define generative model
 
@@ -75,9 +88,10 @@ prior, likelihood, _ = bym2_sim.BYM2_simulators(
     rng = rng,
     corrupt_residual = False,
     beta_loc = 0.0,
-    beta_sd = beta_prior_sd,
+    tau_beta = tau_beta,
     sigma2_sd = sigma2_prior_sd,
-    fix_X = True, X = X_scaled)
+    fix_X = True, X = X_scaled,
+    R_x = R_x, theta_isotropic = theta_isotropic)
 simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
@@ -88,13 +102,12 @@ data = simulator.sample(50)
 #print("Data:", data)
 print("Shapes:", {k: v.shape for k, v in data.items()})
 
-
 # %% define summary network and adapter for fixed effects
 
 beta_adapter = (
     bf.Adapter()
     .convert_dtype("float64", "float32")
-    .concatenate(["beta"], into="inference_variables")
+    .concatenate(["theta"], into="inference_variables")
     .concatenate(["y"], into="summary_variables")
 )
 
@@ -104,7 +117,7 @@ beta_adapter = (
 beta_summary_net = summary_networks.SummaryGNN(
     adjacency_matrix = W_full,
     gnn_dim = 32,
-    compress_dim = 256,
+    compress_dim = 128,
     hidden_dim = 64,
     summary_dim = 32)
 """
@@ -119,7 +132,7 @@ beta_inference_net = bf.networks.CouplingFlow(
     permutation = None,
     transform = "affine",   
     subnet_kwargs={
-       "units": [256 for i in range(depth)],  # Widths of the hidden layers
+       "units": [256 for i in range(depth - 1)],  # Widths of the hidden layers
        "activation": "swish",
        "dropout": False,
        "dropout_prob": 0.0
@@ -173,7 +186,7 @@ val_sims = simulator.sample(500)
 post_draws = beta_approximator.sample(conditions=val_sims, num_samples=num_samples,
                                       batch_size = 5)
 
-par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
+par_names = [rf"$\theta_{{{i}}}$" for i in range(p + 1)]
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 
     targets=val_sims,
@@ -186,7 +199,7 @@ f = bf.diagnostics.plots.recovery(
     targets=val_sims,
     variable_names=par_names
 )
-f.savefig(output_dir + "beta_recovery.png")
+f.savefig(output_dir + "theta_recovery.png")
 
 f = bf.diagnostics.plots.calibration_ecdf(
     estimates=post_draws, 
@@ -195,12 +208,11 @@ f = bf.diagnostics.plots.calibration_ecdf(
     difference=True,
     rank_type="distance"
 )
-f.savefig(output_dir + "beta_calibration.png")
+f.savefig(output_dir + "theta_calibration.png")
 
 # %% incorporate beta network post sd into simulated corrupted residuals
 
-post_draws.keys()
-beta_draws = post_draws['beta']
+beta_draws = bfhelp.backtransform_beta_samps(post_draws, R_x = R_x)
 beta_postcov = np.stack([np.cov(beta_draws[b].T) for b in range(beta_draws.shape[0])])
 beta_noise_cov = beta_postcov.mean(axis=0)
 beta_noise_R = np.linalg.cholesky(beta_noise_cov, upper = False)
@@ -210,10 +222,11 @@ prior, likelihood, _ = bym2_sim.BYM2_simulators(
     rng = rng,
     corrupt_residual = True,
     beta_loc = 0.0,
-    beta_sd = beta_prior_sd,
+    tau_beta = tau_beta,
     beta_noise_R = beta_noise_R,
     sigma2_sd = sigma2_prior_sd,
-    fix_X = True, X = X_scaled)
+    fix_X = True, X = X_scaled, 
+    R_x = R_x, theta_isotropic = theta_isotropic)
 var_simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
@@ -229,13 +242,15 @@ var_adapter = (
     # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
 )
 
+"""
 var_summary_net = summary_networks.SummaryGNN(
     adjacency_matrix = W_full,
     gnn_dim = 32,
     compress_dim = 128,
     hidden_dim = 64,
     summary_dim = 32)
-#var_summary_net = summary_networks.SummaryIdentity()
+"""
+var_summary_net = summary_networks.SummaryIdentity()
 
 # %% define var inference network and amortizer
 
@@ -284,7 +299,7 @@ var_checkpoint = keras.callbacks.ModelCheckpoint(
 
 # %% start training variance network!
 
-history = var_workflow.fit_online(epochs = 150, 
+history = var_workflow.fit_online(epochs = 200, 
                                   batch_size = 64,
                                   num_batches_per_epoch = 100,
                                   validation_data = 64,
@@ -346,14 +361,14 @@ f.savefig(output_dir + "var_calibration.png")
 
 # %% chain sampling settings
 
-n_samples = 500
+n_samples = 1000
 data = simulator.sample(300)
 
 # %% chain samples
 
 post_draws = bfhelp.simulate_chain_samples(
     n_samples, data, X_scaled, beta_approximator, var_approximator,
-    var_batch_size = 10)
+    var_batch_size = 10, R_x = R_x)
 
 # %% plot posterior samples
 
@@ -387,3 +402,70 @@ f = bf.diagnostics.plots.recovery(
 )
 
 f.savefig(output_dir + "chained_recovery.png")
+
+# %% coverage
+
+f = bf.diagnostics.plots.coverage(
+    estimates = post_draws,
+    targets = data,
+    variable_names = par_names,
+    difference = True
+)
+
+f.savefig(output_dir + "chained_coverage.png")
+
+# %% test for small fixed effects
+
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
+    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
+    rng = rng,
+    corrupt_residual = True,
+    beta_loc = 0.0,
+    tau_beta = 0.3,
+    sigma2_sd = 1.0,
+    fix_X = True, X = X_scaled, R_x = R_x,
+    theta_isotropic = False)
+small_simulator = bf.simulators.SequentialSimulator([
+    bf.simulators.LambdaSimulator(prior, is_batched=True),
+    bf.simulators.LambdaSimulator(likelihood, is_batched=True)
+])
+
+# sample from joint distribution
+data = small_simulator.sample(300)
+
+post_draws = bfhelp.simulate_chain_samples(
+    n_samples, data, X_scaled, beta_approximator, var_approximator,
+    R_x = R_x,
+    var_batch_size = 10)
+
+# %% plot small effect recovery
+
+f = bf.diagnostics.plots.recovery(
+    estimates=post_draws, 
+    targets=data,
+    variable_names=par_names
+)
+
+f.savefig(output_dir + "chained_recovery_smallbeta.png")
+
+# %% assess small beta coverage
+
+f = bf.diagnostics.plots.coverage(
+    estimates = post_draws,
+    targets = data,
+    variable_names = par_names,
+    difference = True
+)
+
+f.savefig(output_dir + "chained_smallbeta_coverage.png")
+
+# %% check small-beta calibration plots
+
+f = bf.diagnostics.plots.calibration_ecdf(
+    estimates=post_draws, 
+    targets=data,
+    variable_names=par_names,
+    difference=True,
+    rank_type="distance"
+)
+f.savefig(output_dir + "chained_calibration_smallbeta.png")

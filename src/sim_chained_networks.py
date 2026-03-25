@@ -24,9 +24,6 @@ from pathlib import Path
 import numpy as np
 
 rng = np.random.default_rng(seed = 1130)
-beta_prior_sd = np.sqrt(10)
-sigma2_prior_sd = np.sqrt(10)
-
 
 # %% read command args
 
@@ -46,7 +43,8 @@ fix_X = str_to_bool(sys.argv[4])
 model_name = sys.argv[5]
 lambda_rho = float(sys.argv[6])
 corrupt_residual = str_to_bool(sys.argv[7])
-output_dir = sys.argv[8]
+theta_isotropic = str_to_bool(sys.argv[8])
+output_dir = sys.argv[9]
 
 
 # %% read in shape file
@@ -67,16 +65,36 @@ W_full = W.full()[0]
 Q_scaled, Sigma_scaled, Lambda_scaled, A_scaled = scaled_CAR(W_full)
 n = Q_scaled.shape[0]
 
+# %% prior hyperparameters
+
+tau_beta = np.sqrt(n)
+sigma2_prior_sd = np.sqrt(1)
+
+# %% sample covariates and apply QR decomposition
+
+X_fixed_outputfp = "checkpoints/" + model_name
+if fix_X:
+    X = bym2_sim.generate_CAR_covariates(1, n, p, A_scaled, rng).squeeze()
+    Q_x, R_x = np.linalg.qr(X, mode = 'reduced')
+    np.save(X_fixed_outputfp + "_X.npy", X)
+    np.save(X_fixed_outputfp + "_Qx.npy", Q_x)
+    np.save(X_fixed_outputfp + "_Rx.npy", R_x)
+else:
+    X = None
+    Q_x = None
+    R_x = None
+
 # %% define generative model
 
-prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
     Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
     rng = rng,
     corrupt_residual = corrupt_residual,
     beta_loc = 0.0,
-    beta_sd = beta_prior_sd,
+    tau_beta = tau_beta,
     sigma2_sd = sigma2_prior_sd,
-    fix_X = fix_X)
+    fix_X = fix_X, X = X, R_x = R_x,
+    theta_isotropic = theta_isotropic)
 simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
@@ -93,7 +111,7 @@ print("Data shapes:", {k: v.shape for k, v in data.items()})
 beta_adapter = (
     bf.Adapter()
     .convert_dtype("float64", "float32")
-    .concatenate(["beta"], into="inference_variables")
+    .concatenate(["theta"], into="inference_variables")
     .concatenate(["y"], into="summary_variables")
 )
 
@@ -169,11 +187,6 @@ beta_workflow.approximator.save(filepath=output_fp)
 
 beta_approximator = keras.saving.load_model(output_fp)
 
-# %% save covariate matrix if fixed
-
-X_fixed_outputfp = Path("checkpoints") / (model_name + "_X.npy")
-np.save(X_fixed_outputfp, X_fixed)
-
 # %% check diagnostics
 
 num_samples = 5000
@@ -183,7 +196,7 @@ post_draws = beta_approximator.sample(conditions=val_sims,
                                       batch_size = 10)
 post_draws.keys()
 
-par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
+par_names = [rf"$\theta_{{{i}}}$" for i in range(p + 1)]
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 
     targets=val_sims,
@@ -196,7 +209,7 @@ f = bf.diagnostics.plots.recovery(
     targets=val_sims,
     variable_names=par_names
 )
-f.savefig(output_dir + "beta_recovery.png")
+f.savefig(output_dir + "theta_recovery.png")
 
 f = bf.diagnostics.plots.calibration_ecdf(
     estimates=post_draws, 
@@ -205,7 +218,7 @@ f = bf.diagnostics.plots.calibration_ecdf(
     difference = True,
     rank_type="distance"
 )
-f.savefig(output_dir + "beta_calibration.png")
+f.savefig(output_dir + "theta_calibration.png")
 
 # %% mitigate exposure bias via ancestral network sampling
 
@@ -215,8 +228,7 @@ var_simulator = bfhelp.ancestral_residual_simulator(
     prior = prior, likelihood = likelihood, beta_approx = beta_approximator)
 """
 
-post_draws.keys()
-beta_draws = post_draws['beta']
+beta_draws = bfhelp.backtransform_beta_samps(post_draws, R_x = R_x)
 beta_postcov = np.stack([np.cov(beta_draws[b].T) for b in range(beta_draws.shape[0])])
 beta_noise_cov = beta_postcov.mean(axis=0)
 beta_noise_R = np.linalg.cholesky(beta_noise_cov, upper = False)
@@ -228,15 +240,16 @@ beta_avgpostsd = np.mean(beta_postsd, axis = 0)
 beta_noise_sd = beta_avgpostsd
 """
 
-prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
     Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
     rng = rng,
     corrupt_residual = True,
     beta_loc = 0.0,
-    beta_sd = beta_prior_sd,
+    tau_beta = tau_beta,
     beta_noise_R = beta_noise_R,
     sigma2_sd = sigma2_prior_sd,
-    fix_X = True, X = X_fixed)
+    fix_X = True, X = X, R_x = R_x,
+    theta_isotropic = theta_isotropic)
 var_simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
@@ -361,7 +374,8 @@ data = simulator.sample(200)
 # %% chain samples
 
 post_draws = bfhelp.simulate_chain_samples(
-    n_samples, data, X_fixed, beta_approximator, var_approximator,
+    n_samples, data, X, beta_approximator, var_approximator,
+    R_x = R_x,
     var_batch_size = 10)
 
 # %% plot posterior samples
@@ -396,3 +410,71 @@ f = bf.diagnostics.plots.recovery(
 )
 
 f.savefig(output_dir + "chained_recovery.png")
+
+# %% assess coverage
+
+f = bf.diagnostics.plots.coverage(
+    estimates = post_draws,
+    targets = data,
+    variable_names = par_names,
+    difference = True
+)
+
+f.savefig(output_dir + "chained_coverage.png")
+
+# %% test for small fixed effects
+
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
+    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
+    rng = rng,
+    corrupt_residual = True,
+    beta_loc = 0.0,
+    tau_beta = 0.5,
+    beta_noise_R = beta_noise_R,
+    sigma2_sd = 1.0,
+    fix_X = True, X = X, R_x = R_x,
+    theta_isotropic = theta_isotropic)
+small_simulator = bf.simulators.SequentialSimulator([
+    bf.simulators.LambdaSimulator(prior, is_batched=True),
+    bf.simulators.LambdaSimulator(likelihood, is_batched=True)
+])
+
+# sample from joint distribution
+data = small_simulator.sample(300)
+
+post_draws = bfhelp.simulate_chain_samples(
+    n_samples, data, X, beta_approximator, var_approximator,
+    R_x = R_x,
+    var_batch_size = 10)
+
+# %% plot small effect recovery
+
+f = bf.diagnostics.plots.recovery(
+    estimates=post_draws, 
+    targets=data,
+    variable_names=par_names
+)
+
+f.savefig(output_dir + "chained_recovery_smallbeta.png")
+
+# %% assess coverage
+
+f = bf.diagnostics.plots.coverage(
+    estimates = post_draws,
+    targets = data,
+    variable_names = par_names,
+    difference = True
+)
+
+f.savefig(output_dir + "chained_coverage_smallbeta.png")
+
+# %% check small-beta calibration plots
+
+f = bf.diagnostics.plots.calibration_ecdf(
+    estimates=post_draws, 
+    targets=data,
+    variable_names=par_names,
+    difference=True,
+    rank_type="distance"
+)
+f.savefig(output_dir + "chained_calibration_smallbeta.png")

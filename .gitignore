@@ -6,3 +6,4 @@ src/__pycache__
 checkpoints/
 output/
 data/
+build/

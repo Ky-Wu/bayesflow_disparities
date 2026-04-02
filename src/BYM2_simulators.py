@@ -202,7 +202,7 @@ def BYM2_likelihood(n_samples, beta, beta_corrupted,
         r = y - mu_corrupted[:,:,np.newaxis]
     else:
         r = y - mu[:,:,np.newaxis]
-    return dict(X = X, y = y, r = r)
+    return dict(X = X, y = y, r = r, gamma = gamma)
 
 def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
                     rng = np.random.default_rng(),

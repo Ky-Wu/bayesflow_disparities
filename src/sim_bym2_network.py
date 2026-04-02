@@ -37,7 +37,8 @@ p = int(sys.argv[3])
 fix_X = str_to_bool(sys.argv[4])
 model_name = sys.argv[5]
 lambda_rho = float(sys.argv[6])
-output_dir = sys.argv[7]
+theta_isotropic = str_to_bool(sys.argv[7])
+output_dir = sys.argv[8]
 
 rng = np.random.default_rng(seed = 1130)
 
@@ -59,16 +60,35 @@ W_full = W.full()[0]
 Q_scaled, Sigma_scaled, Lambda_scaled, A_scaled = scaled_CAR(W_full)
 n = Q_scaled.shape[0]
 
+# %% prior hyperparameters
+
+tau_beta = np.sqrt(n)
+sigma2_prior_sd = np.sqrt(1)
+
+# %% sample covariates and apply QR decomposition
+
+X_fixed_outputfp = "checkpoints/" + model_name
+if fix_X:
+    X = bym2_sim.generate_CAR_covariates(1, n, p, A_scaled, rng).squeeze()
+    Q_x, R_x = np.linalg.qr(X, mode = 'reduced')
+    np.save(X_fixed_outputfp + "_X.npy", X)
+    np.save(X_fixed_outputfp + "_Qx.npy", Q_x)
+    np.save(X_fixed_outputfp + "_Rx.npy", R_x)
+else:
+    X = None
+    Q_x = None
+    R_x = None
+
 # %% define generative model
 
-prior, likelihood, X_fixed = bym2_sim.BYM2_simulators(Lambda_scaled,
-                                             A_scaled, A_scaled, lambda_rho, p,
-                                             rng = rng,
-                                             corrupt_residual = False,
-                                             beta_noise_sd = 1.0,
-                                             beta_loc = 0.0,
-                                             beta_sd = 10.0,
-                                             fix_X = fix_X)
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
+    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
+    rng = rng,
+    beta_loc = 0.0,
+    tau_beta = tau_beta,
+    sigma2_sd = sigma2_prior_sd,
+    fix_X = fix_X, X = X, R_x = R_x,
+    theta_isotropic = theta_isotropic)
 simulator = bf.simulators.SequentialSimulator([
     bf.simulators.LambdaSimulator(prior, is_batched=True),
     bf.simulators.LambdaSimulator(likelihood, is_batched=True)
@@ -76,8 +96,8 @@ simulator = bf.simulators.SequentialSimulator([
 
 # sample from joint distribution
 data = simulator.sample(50)
-print("Data:", data)
-print("Shapes:", {k: v.shape for k, v in data.items()})
+#print("Data:", data)
+print("Data shapes:", {k: v.shape for k, v in data.items()})
 
 # %% define summary network and adapter
 
@@ -86,14 +106,15 @@ adapter = (
     # .as_set(["X", "y", "X_mask", "y_mask"])
     .as_set(["y"])
     .convert_dtype("float64", "float32")
-    .concatenate(["beta_signlog", "log_sigma2", "logit_rho"], into="inference_variables")
+    .concatenate(["theta", "log_sigma2", "logit_rho"], into="inference_variables")
     .concatenate(["y"], into="summary_variables")
     # .concatenate(["X", "y", "X_mask", "y_mask"], into = "summary_variables")
 )
 
 # Graph neural network as summary network (spatial data not row-exchangeable)
 #summary_net = summary_networks.SummaryGNN(W_full, 32, 32, 16, 16)
-summary_net = summary_networks.SummaryIdentity()
+#summary_net = summary_networks.SummaryIdentity()
+summary_net = summary_networks.SummaryGNNPlusIdentity(W_full, 32, 64, 64, 32)
 
 # %% define inference network and amortizer
 
@@ -141,7 +162,7 @@ optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
 
 # %% start training!
 
-history = workflow.fit_online(epochs = 200, 
+history = workflow.fit_online(epochs = 300, 
                               batch_size = 64,
                               iterations_per_epoch = 1000,
                               validation_data = 64,
@@ -164,7 +185,7 @@ post_draws.keys()
 
 # %% plot posterior samples for first dataset
 
-par_names = [rf"$\text{{sgnlog}}(\beta_{{{i}}})$" for i in range(p + 1)]
+par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
 par_names += r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 

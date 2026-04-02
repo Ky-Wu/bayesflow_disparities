@@ -222,11 +222,16 @@ def simulate_chain_samples(n_samples, data, X, beta_approx, var_approx,
     }
     var_draws = var_approx.sample(conditions = var_data, num_samples = 1,
                                   batch_size = var_batch_size)
-    return {
+    out = {
         "beta" : beta_draws,
         "log_sigma2" : var_draws["log_sigma2"].reshape(batches, n_samples, 1),
         "logit_rho" : var_draws["logit_rho"].reshape(batches, n_samples, 1),
     }
+    if "gamma" in var_draws:
+        n = X.shape[0]
+        out['gamma'] = var_draws['gamma'].reshape(batches, n_samples, n)
+
+    return out
 
 if __name__ == "__main__":
     fp = "data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"

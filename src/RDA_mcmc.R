@@ -53,10 +53,14 @@ lower_rho <- 0.00
 upper_rho <- 1.0
 lambda_rho <- 0.001
 # initialize sampler
+
+
 gibbsSampler <- new(BYM2FlatBetaMCMC, X, y, Q_scaled)
 gibbsSampler$setPriors(a_sigma, b_sigma, rho_prior_type = "pc",
                        a_rho, b_rho,
                        lower_rho, upper_rho, lambda_rho)
+n_chains <- 4
+
 gibbsSampler$initOLS()
 
 print("10000 Burn in:")

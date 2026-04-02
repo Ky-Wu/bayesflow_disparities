@@ -71,7 +71,6 @@ class SummaryIdentity(bf.networks.SummaryNetwork):
     def from_config(cls, config):
         return cls(**config)
 
-
 @keras.saving.register_keras_serializable(package="BayesflowSpatialSummary")
 class SummaryGNN(bf.networks.SummaryNetwork):
     def __init__(self, adjacency_matrix,
@@ -88,6 +87,7 @@ class SummaryGNN(bf.networks.SummaryNetwork):
         self.hidden_dim = hidden_dim
         self.summary_dim = summary_dim
         
+
         # --- 1. Precompute Constants ---
         A_tilde = adjacency_matrix + np.eye(adjacency_matrix.shape[0])
         d = np.array(A_tilde.sum(1))
@@ -140,6 +140,7 @@ class SummaryGNN(bf.networks.SummaryNetwork):
         )
         """
         
+        
         # Step 4: Global Stats (Backend-agnostic)
         #y_scale_log = ops.log(ops.std(x[:, :, -1:], axis=1))
         sigma_nugget = ops.std(h_residual, axis=1)
@@ -191,3 +192,142 @@ class SummaryGNN(bf.networks.SummaryNetwork):
             config["adjacency_matrix"] = np.array(config["adjacency_matrix"])
         return cls(**config)
     
+# only use this for univariate input
+@keras.saving.register_keras_serializable(package="BayesflowSpatialSummary")
+class SummaryGNNPlusIdentity(SummaryGNN):
+    def __init__(self, adjacency_matrix,
+                 gnn_dim=64,
+                 compress_dim=64,
+                 hidden_dim=32,
+                 summary_dim=16, **kwargs):
+        super().__init__(adjacency_matrix, gnn_dim, compress_dim,
+                         hidden_dim, summary_dim, **kwargs)
+        
+    def call(self, x, **kwargs):
+        result = super().call(x, **kwargs)
+        return ops.concatenate([result, x.squeeze(-1)], axis = -1)
+        
+    
+@keras.saving.register_keras_serializable(package="BayesflowSpatialSummary")
+class ResidualSummary(bf.networks.SummaryNetwork):
+    def __init__(self, adjacency_matrix, X,
+                 gnn_dim=32,
+                 compress_dim=64,
+                 hidden_dim=64,
+                 summary_dim=32, **kwargs):
+        super().__init__(**kwargs)
+        
+        # save input arguments for recovery in config
+        self.adjacency_matrix = np.asarray(adjacency_matrix)
+        self.gnn_dim = gnn_dim
+        self.compress_dim = compress_dim
+        self.hidden_dim = hidden_dim
+        self.summary_dim = summary_dim
+        
+        XtX = X.T @ X
+        XtX_chol = ops.linalg.cholesky(XtX, upper = False)
+        XtXcholXt = ops.linalg.solve_triangular(XtX_chol, X.T, lower= True)
+        H = XtXcholXt.T @ XtXcholXt
+        self.I_H = ops.eye(H.shape[0]) - H
+        
+        # --- 1. Precompute Constants ---
+        A_tilde = adjacency_matrix + np.eye(adjacency_matrix.shape[0])
+        d = np.array(A_tilde.sum(1))
+        d_inv_sqrt = np.power(d, -0.5).flatten()
+        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+        D_inv_sqrt = np.diag(d_inv_sqrt)
+        
+        # Use keras.ops for backend-agnostic constants
+        self.A_norm = ops.cast(D_inv_sqrt @ A_tilde @ D_inv_sqrt, dtype="float32")
+        L = np.diag(np.array(adjacency_matrix.sum(1))) - adjacency_matrix
+        self.L_tensor = ops.cast(L, dtype="float32")
+        
+        # --- 2. Layers ---
+
+        #self.rough_compress = layers.Dense(compress_dim)
+        self.fc_1 = layers.Dense(gnn_dim)
+        self.fc_2 = layers.Dense(gnn_dim)
+        self.compress = layers.Dense(compress_dim)
+        self.smooth_compress = layers.Dense(compress_dim)
+        self.fc_hidden = layers.Dense(hidden_dim)
+        self.fc_out = layers.Dense(summary_dim)
+    def call(self, x, **kwargs):
+        # input raw data y and process into summary statistics of residuals
+        # r = y - X\hat{\beta} = (I - X(X^{\T}X)^{-1}X^{T})y
+        
+        r = ops.matmul(self.I_H, x)
+        h = keras.activations.swish(self.fc_1(r))
+        h = keras.activations.swish(self.fc_2(h))
+        
+        # Step 2: Spatial Filtering (Using ops.matmul)
+        h_spatial = ops.matmul(self.A_norm, h)
+        h_rough = ops.matmul(self.L_tensor, h)
+        h_residual = h - h_spatial
+        
+        # Step 3: Branch Compression
+        batch_size = ops.shape(x)[0]
+        
+        # Reshape + Compress
+        f = keras.activations.swish(
+            self.compress(ops.reshape(h, (batch_size, -1)))
+        )
+        f_smooth = keras.activations.swish(
+            self.smooth_compress(ops.reshape(h_spatial, (batch_size, -1)))
+        )
+        
+        # Step 4: Global Stats (Backend-agnostic)
+        #y_scale_log = ops.log(ops.std(x[:, :, -1:], axis=1))
+        sigma_nugget = ops.std(h_residual, axis=1)
+        tau_spatial = ops.std(h_rough, axis=1)
+        
+        
+        # Step 5: Additional Spatial Statistics
+
+        # 5a. The Rayleigh Quotient (Graph Frequency)
+        # Formula: (h^T L h) / (h^T h)
+        # numerator: h * (L @ h) -> then sum over nodes
+        # denominator: h * h -> then sum over nodes
+        # Shape: (batch, 64)
+        rayleigh_stat = ops.sum(h * h_rough, axis=1) \
+            / (ops.sum(ops.square(h), axis=1) + 1e-8)
+        
+        # Step 5: Concatenate and Project
+        summary = ops.concatenate([
+            f, f_smooth,
+            rayleigh_stat,
+            sigma_nugget,
+            tau_spatial
+            #y_scale_log, geary_stat, moran_stat
+        ], axis=-1)
+        
+        summary_hidden = keras.activations.swish(self.fc_hidden(summary))
+        # include observations y
+        result = ops.concatenate([
+            x.squeeze(-1), self.fc_out(summary_hidden)
+        ], axis=-1)
+        
+        return result
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "adjacency_matrix": self.adjacency_matrix.tolist(),
+            "X": self.X.tolist(),
+            "gnn_dim": self.gnn_dim,
+            "compress_dim": self.compress_dim,
+            "hidden_dim": self.hidden_dim,
+            "summary_dim": self.summary_dim
+        })
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        """
+        Explicitly convert the serialized list back to a numpy array 
+        before passing it to the constructor.
+        """
+        if "adjacency_matrix" in config:
+            config["adjacency_matrix"] = np.array(config["adjacency_matrix"])
+        if "X" in config:
+            config["X"] = np.array(config["X"])
+        return cls(**config)

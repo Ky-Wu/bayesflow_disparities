@@ -20,8 +20,8 @@ REGION="CA"
 P_VALUE="7"
 FIX_X="True"
 MODEL_NAME="ca_fixedXp7_joint"
-LAMBDA_RHO="0.03"
-CORRUPT_RESIDUAL="True"
+LAMBDA_RHO="0.001"
+THETA_ISOTROPIC="True"
 OUTPUT_DIR="output/CA_sim/"
 
 # 3. Safety Check
@@ -44,4 +44,5 @@ python -u -m src.sim_bym2_network \
     "$FIX_X" \
     "$MODEL_NAME" \
     "$LAMBDA_RHO" \
+    "$THETA_ISOTROPIC" \
     "$OUTPUT_DIR"

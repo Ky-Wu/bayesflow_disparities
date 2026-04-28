@@ -25,7 +25,7 @@ def load_and_subset(filename, cols_map, **kwargs):
 
 # %% read in shapefile
 
-fp = os.path.join(wd, "data", "cb_2017_us_county_500k", "cb_2017_us_county_500k.shp")
+fp = os.path.join(wd, "data", "cb_2014_us_county_500k", "cb_2014_us_county_500k.shp")
 shp, _ = shp_reader.read_US_shapefile(fp)
 shp['County_FIPS'] = (shp['STATEFP'] + shp['COUNTYFP']).astype(int)
 
@@ -69,6 +69,7 @@ data = data[data['County_FIPS'].isin(shp['County_FIPS'])]
 filename = "IHME_US_COUNTY_TOTAL_AND_DAILY_SMOKING_PREVALENCE_1996_2012.csv"
 path = os.path.join(wd, "data", filename)
 smoking = pd.read_csv(path)
+# most recent data is from 2012
 smoking = smoking.query("year == 2012 and sex == 'Both' and county.notnull()")
 cols_map = {
     'county': 'county',
@@ -173,7 +174,7 @@ all_data[pred_cols] = all_data[pred_cols].astype(float)
 
 # %% save 
 
-all_data.to_csv(os.path.join(wd, "output", "RDA", "data_cleaned.csv"))
+all_data.to_csv(os.path.join(wd, "output", "RDA", "data_cleaned.csv"), index = False)
 
 # %% Merge all data
 

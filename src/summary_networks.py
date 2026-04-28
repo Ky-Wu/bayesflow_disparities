@@ -219,6 +219,7 @@ class ResidualSummary(bf.networks.SummaryNetwork):
         
         # save input arguments for recovery in config
         self.adjacency_matrix = np.asarray(adjacency_matrix)
+        self.X = np.asarray(X)
         self.gnn_dim = gnn_dim
         self.compress_dim = compress_dim
         self.hidden_dim = hidden_dim

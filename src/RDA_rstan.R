@@ -1,18 +1,24 @@
 library(rstan)
 library(sf)
 library(spdep)
-library(Rcpp)
-library(RcppArmadillo)
-library(coda)
-Rcpp::sourceCpp(file.path(getwd(), "rcpp", "bym2_mcmc.cpp"))
+set.seed(1130)
+rm(list = ls())
 source(file.path(getwd(), "R", "disp_helpers.R"))
 
 model_fp <- file.path(getwd(), "rstan", "bym2_collapsed.stan")
+vague_model_fp <- file.path(getwd(), "rstan", "bym2_vague_prior.stan")
 data_cleaned <- read.csv(file.path(getwd(), "..", "output", "RDA", "data_cleaned.csv"))
 shp_fp <- file.path(getwd(), "..", "output", "RDA", "us_mainland_data.shp")
 shp <- st_read(shp_fp)
 shp$County_FIPS <- as.integer(paste0(shp$STATEFP, shp$COUNTYFP))
 data_shp <- merge(shp, data_cleaned, by = "County_FIPS")
+
+# drop Z dimension
+data_shp <- st_zm(data_shp, drop = TRUE, what = "ZM")
+# Verify all are now XY
+dims <- sapply(st_geometry(data_shp), function(g) class(g)[1])
+table(dims)  # should show only XY: 3103
+
 pred_cols <- c('total_mean_smoking', 'unemployed_2014', 'SVI_2014',
                'inactivity_2014',
                'uninsured_2012_2016', 'diabetes_2014', 'obesity_2014')
@@ -51,9 +57,9 @@ stan_data <- list(Q_x = Q_x, Y = y, p = p, N = N, Sigma_chol = Sigma_chol)
 
 runtime <- system.time({
   fit <- rstan::stan(file = model_fp, data = stan_data,
-                     iter = 1200, warmup = 1000, chains = 5)
+                     iter = 3000, warmup = 1000, chains = 4)
 })
-
+print(runtime)
 print(fit)
 samps <- as.matrix(fit)
 theta_samps <- samps[,grep("theta", colnames(samps))]
@@ -66,3 +72,30 @@ samps <- list(beta = beta_samps,
               rho = rho_samps)
 
 saveRDS(samps, file.path(getwd(), '..', 'output', 'RDA', 'mcmc_samps.rds'))
+
+runtime <- system.time({
+  vague_fit <- rstan::stan(file = vague_model_fp, data = stan_data,
+                           iter = 3000, warmup = 1000, chains = 4)
+})
+print(runtime)
+print(vague_fit)
+samps <- as.matrix(vague_fit)
+theta_samps <- samps[,grep("theta", colnames(samps))]
+sigma2_samps <- samps[, 'sigma2']
+rho_samps <- samps[, 'rho']
+beta_samps <- t(backsolve(R_x, t(theta_samps), upper.tri = TRUE))
+
+vague_samps <- list(beta = beta_samps,
+                    sigma2 = sigma2_samps,
+                    rho = rho_samps)
+saveRDS(vague_samps, file.path(getwd(), '..', 'output', 'RDA', 'mcmc_samps_vague_prior.rds'))
+
+## baseline speed comparison ##
+baseline_data <- fread(file.path(getwd(), '..', 'output', 'RDA', 'baseline_data.csv'))
+stan_data <- list(Q_x = Q_x, Y = baseline_data$y, p = p, N = N, Sigma_chol = Sigma_chol)
+
+runtime <- system.time({
+  fit <- rstan::stan(file = model_fp, data = stan_data,
+                     iter = 3000, warmup = 1000, chains = 4)
+})
+print(runtime)

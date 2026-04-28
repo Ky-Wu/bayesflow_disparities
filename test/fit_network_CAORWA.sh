@@ -15,7 +15,7 @@ echo "Running from: $(pwd)"
 
 # 2. Configuration Parameters
 # Using descriptive names makes the Python call easier to read
-SHP_PATH="data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
+SHP_PATH="data/cb_2014_us_county_500k/cb_2014_us_county_500k.shp"
 REGION="CAORWA"
 P_VALUE="7"
 FIX_X="True"

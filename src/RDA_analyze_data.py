@@ -23,19 +23,18 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
-import seaborn as sns
 from src import disparities_helpers as disp
 from libpysal.weights import Rook
 from scipy.optimize import minimize_scalar
+import rdata
 
-shp_fp = "data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
+shp_fp = "data/cb_2014_us_county_500k/cb_2014_us_county_500k.shp"
 data_fp = "output/RDA/data_cleaned.csv"
 model_name = "US_lungcancer"
-output_dir = "output/RDA/joint_network_v1/"
-net_fp = Path("checkpoints") / (model_name + "_net_v1.keras")
+output_dir = "output/RDA/joint_network_v8/"
+net_fp = Path("checkpoints") / (model_name + "_net_v8.keras")
 
 rng = np.random.default_rng(seed = 1130)
-
 
 # %% load in shapefile and cleaned data from RDA_data_setup.py
 
@@ -44,9 +43,9 @@ shp['County_FIPS'] = (shp['STATEFP'] + shp['COUNTYFP']).astype(int)
 all_data = pd.read_csv(data_fp)
 data_shp = pd.merge(shp, all_data, on = "County_FIPS", how = "inner")
 data_shp = data_shp.reset_index(drop = True)
-data_shp.to_file("output/RDA/us_mainland_data.geojson", driver = "GeoJSON")
+data_shp.to_file("output/RDA/us_mainland_data.shp")
 
-# %% extract covariate matrix and resposne vector
+# %% extract covariate matrix and response vector
 
 pred_cols = ['total_mean_smoking', 'unemployed_2014', 'SVI_2014', 'inactivity_2014',
 'uninsured_2012_2016', 'diabetes_2014', 'obesity_2014']
@@ -54,7 +53,6 @@ X = data_shp[pred_cols]
 y = data_shp[['mortality2014']]
 n = X.shape[0]
 p = len(pred_cols)
-tau2_beta = np.sqrt(n / 10.0)
 
 # %% get adjacency 
 
@@ -84,112 +82,14 @@ data = {"y": np.reshape(y_scaled, (1, n, 1))}
 Q_x = np.load("checkpoints/US_lungcancer_Qx.npy")
 R_x = np.load("checkpoints/US_lungcancer_Rx.npy")
 
-# %% define generative model
-
-lambda_rho = 0
-tau2_beta = np.sqrt(n / 10.0)
-sigma2_prior_sd = np.sqrt(1.0)
-theta_isotropic = True
-prior, likelihood, _ = bym2_sim.BYM2_simulators(
-    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
-    rng = rng,
-    corrupt_residual = False,
-    beta_loc = 0.0,
-    tau_beta = tau2_beta,
-    sigma2_sd = sigma2_prior_sd,
-    fix_X = True, X = X_scaled,
-    R_x = R_x, theta_isotropic = theta_isotropic)
-simulator = bf.simulators.SequentialSimulator([
-    bf.simulators.LambdaSimulator(prior, is_batched=True),
-    bf.simulators.LambdaSimulator(likelihood, is_batched=True)
-])
-data = simulator.sample(5)
-
 # %% load networks
 
 approximator = keras.saving.load_model(net_fp)
 
-# %%
-
-approximator.save_weights(output_dir + "model.weights.h5")
-
-# %% train more if needed 
-
-summary_net = summary_networks.SummaryGNNPlusIdentity(
-    adjacency_matrix = W_full,
-    gnn_dim = 32,
-    compress_dim = 128,
-    hidden_dim = 64,
-    summary_dim = 32)
-
-
-depth = 8
-inference_net = bf.networks.CouplingFlow(
-    depth=depth,
-    permutation = None,
-    transform = "affine",   
-    subnet_kwargs={
-       "units": [256 for i in range(depth - 1)],  # Widths of the hidden layers
-       "activation": "swish",
-       "dropout": False,
-       "dropout_prob": 0.0
-   }
-)
-
-adapter = (
-    bf.Adapter()
-    .convert_dtype("float64", "float32")
-    .concatenate(["theta", "log_sigma2", "logit_rho"], into="inference_variables")
-    .concatenate(["y"], into="summary_variables")
-)
-
-new_approx =  bf.approximators.ContinuousApproximator(
-    summary_network=summary_net,
-    inference_network=inference_net,
-    adapter=adapter,
-    standardize = ["inference_variables"]
-)
-
-TARGET_LR = 1e-5   # 5e-5
-EPOCHS = 50
-NUM_BATCHES = 200             # steps per epoch
-TOTAL_STEPS = EPOCHS * NUM_BATCHES
-
-lr_schedule = keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=TARGET_LR,  # starts at 5e-5
-    decay_steps=TOTAL_STEPS,
-    alpha=0.0,          # decays all the way to 0 at the end
-)
-optimizer = keras.optimizers.AdamW(learning_rate=1e-5, 
-                                   weight_decay=1e-4,
-                                   clipnorm=1.1)
-new_approx.compile(optimizer = optimizer)
-history = new_approx.fit(
-    simulator=simulator,
-    num_batches=1,
-    epochs=1,
-    batch_size=1
-)
-
-# %%
-
-new_approx.load_weights(output_dir + "model.weights.h5")
-
-# %%
-
-history = new_approx.fit(
-    epochs=50,
-    num_batches=200,
-    batch_size=64,
-    validation_batch_size = 64,
-    callbacks = [bfhelp.CleanLRLogger()],
-    simulator=simulator,
-)
-
 # %% chain sampling settings
 
-n_samples = 500
-batch_size = 10
+n_samples = 10000
+batch_size = 1
 
 # %% draw posterior samples
 
@@ -198,15 +98,29 @@ post_draws = approximator.sample(conditions=data, num_samples=n_samples,
 
 post_draws = {
     'beta' : bfhelp.backtransform_beta_samps(post_draws, R_x = R_x),
-    'log_sigma2' : post_draws['log_sigma2'],
-    'logit_rho' : post_draws['logit_rho']
+    'sigma2' : np.exp(post_draws['log_sigma2']),
+    'rho' : (1.0 / (1.0 + np.exp(-post_draws['logit_rho'])))
     }
 
+# %% save drawn samples
+
+# Save as a compressed archive
+np.savez_compressed(output_dir + 'post_draws.npz', **post_draws)
+
+# %% 
+
+# To load:
+post_draws_load = np.load(output_dir + 'post_draws.npz')
+post_draws = {
+    'beta' : post_draws_load['beta'],
+    'sigma2' : post_draws_load['sigma2'],
+    'rho' : post_draws_load['rho']    
+}
 
 # %% plot posterior samples
 
 par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
-par_names += r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"
+par_names += r"$\sigma^2$", r"$\rho$"
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 
     targets=None,
@@ -218,8 +132,8 @@ f.savefig(output_dir + "RDA_analysis_postsamples.png")
 # %% get gamma samples
 
 beta = post_draws['beta']
-sigma2 = np.exp(post_draws['log_sigma2'])
-rho = (1.0 / (1.0 + np.exp(-post_draws['logit_rho'])))
+sigma2 = post_draws['sigma2']
+rho = post_draws['rho']
 gamma = disp.sample_gamma_posterior(
     beta = beta,
     sigma2 = sigma2,
@@ -230,6 +144,29 @@ gamma = disp.sample_gamma_posterior(
     P = P,
     rng = rng)
 
+# %% compute beta posterior summaries
+
+beta_quantiles = np.quantile(beta, [0.025, 0.975], axis = 1)
+beta_pmean = np.mean(beta, axis = 1)
+
+beta_summary = pd.DataFrame({
+    "posterior_mean" : beta_pmean.squeeze(),
+    "quantile_0_025" : beta_quantiles[0,:,:].squeeze(),
+    "quantile_0_975" : beta_quantiles[1,:,:].squeeze()
+})
+
+beta_summary.to_csv(output_dir + "beta_summary.csv", index = False)
+
+# %% var param posterior summaries
+
+var_summary = pd.DataFrame({
+    "variable" : ["sigma2", "rho"],
+    "posterior_mean" : [np.mean(sigma2), np.mean(rho)],
+    "quantile_0_025" : [np.quantile(sigma2, 0.025), np.quantile(rho, 0.025)],
+    "quantile_0_975" : [np.quantile(sigma2, 0.975), np.quantile(rho, 0.975)]})
+
+var_summary.to_csv(output_dir + "var_summary.csv", index = False)
+
 # %% get adj list
 
 # Use > 0 to capture all edges, including those with weight 1
@@ -239,11 +176,13 @@ edge_list = np.argwhere(np.triu(W_full, k = 1) > 0).tolist()
 
 diffs = disp.gamma_diffs_marginalvar(gamma, sigma2, rho, edge_list)
 
+"""
 # %%
 
 diffs = disp.compute_std_diff(gamma, sigma2, rho, 
                                          X_scaled, Lambda, P,
                                          edge_list)
+"""
 
 # %% optimize epsilon loss criterion
 
@@ -254,18 +193,16 @@ result = minimize_scalar(loss,
 optim_e = result['x']
 diff_prob = disp.compute_diff_prob(diffs, optim_e)
 
-
 # %% apply bayesian FDR control
 
 delta = 0.05
 cutoff_prob, fdr_estimate = disp.compute_fdr_cutoff(diff_prob, delta = delta)
 
-# %% 
+# %% compute decisions
 
 decisions = diff_prob >= cutoff_prob
 
-# %%
-import rdata
+# %% import mcmc samps
 
 # Parses the file into a Python object representation
 with open('output/RDA/mcmc_samps.rds', 'rb') as f:
@@ -284,7 +221,7 @@ gamma_mcmc = disp.sample_gamma_posterior(
     P = P,
     rng = rng)
 
-# %%
+# %% compute mcmc diff probs
 
 mcmc_diffs = disp.gamma_diffs_marginalvar(gamma_mcmc, sigma2_mcmc, rho_mcmc, 
                                           edge_list)
@@ -298,31 +235,112 @@ result = minimize_scalar(loss,
 mcmc_optim_e = result['x']
 mcmc_diff_prob = disp.compute_diff_prob(mcmc_diffs, optim_e)
 
+# %% compute mcmc decisions
+
+mcmc_diff_prob2 = disp.compute_diff_prob(mcmc_diffs, mcmc_optim_e)
+cutoff_prob, fdr_estimate = disp.compute_fdr_cutoff(mcmc_diff_prob2, delta = delta)
+mcmc_decisions = mcmc_diff_prob2 >= cutoff_prob
+
+# %% check number of disparities using mcmc
+
+np.sum(mcmc_decisions)
 
 # %% compare mcmc and network diff probs
 
-plt.scatter(diff_prob, mcmc_diff_prob, alpha = 0.05)
+f = plt.scatter(diff_prob, mcmc_diff_prob, alpha = 0.3, s = 1)
+plt.axline((0, 0), slope=1, color='black', linestyle='--')
+plt.xlabel("Network Difference Probability")
+plt.ylabel("MCMC Difference Probability (Same Prior)")
+plt.savefig(output_dir + "vague_prior_diff_prob_comparison.png")
 print("Correlation: " + str(np.corrcoef(diff_prob, mcmc_diff_prob)[0,1]))
 
-# %% compare beta (smoking)
+# %% import vague mcmc samps
 
-# Sort the samples
-j = 1
-beta1 = np.sort(beta_samps[:,j])
-plt.hist(beta1)
-beta2 = np.sort(beta_mcmc[:,j])
-plt.hist(beta2, color="red")
+# Parses the file into a Python object representation
+with open('output/RDA/mcmc_samps_vague_prior.rds', 'rb') as f:
+    parsed_data = rdata.read_rds(f)
+beta_mcmc = parsed_data['beta'][np.newaxis,:,:]
+n_s = beta_mcmc.shape[0]
+sigma2_mcmc = parsed_data['sigma2'][np.newaxis,:,np.newaxis]
+rho_mcmc = parsed_data['rho'][np.newaxis,:,np.newaxis]
+gamma_mcmc = disp.sample_gamma_posterior(
+    beta = beta_mcmc,
+    sigma2 = sigma2_mcmc,
+    rho = rho_mcmc,
+    X = X_scaled,
+    y = y_scaled,
+    Lambda = Lambda,
+    P = P,
+    rng = rng)
 
-# Create the plot
-plt.figure(figsize=(6, 6))
-plt.plot(beta1, beta2, ls="", marker="o") # "ls=" removes the line, "marker=o" adds points
+vague_diffs = disp.gamma_diffs_marginalvar(gamma_mcmc, sigma2_mcmc, rho_mcmc, 
+                                          edge_list)
+vague_diff_prob = disp.compute_diff_prob(vague_diffs, optim_e)
 
-# Add a 45-degree reference line
-max_val = max(beta1[-1], beta2[-1])
-min_val = min(beta1[0], beta2[0])
-plt.plot([min_val, max_val], [min_val, max_val], 'k-', lw=1) # 'k-' for a black solid line
+# %% plot vague vs net diff prob
 
-plt.xlabel("Quantiles of Sample 1")
-plt.ylabel("Quantiles of Sample 2")
-plt.title("Q-Q Plot of Two Samples")
-plt.show()
+f = plt.scatter(diff_prob, vague_diff_prob, alpha = 0.3, s = 1)
+plt.axline((0, 0), slope=1, color='black', linestyle='--')
+plt.xlabel("Network Difference Probability")
+plt.ylabel("MCMC Difference Probability (Vague Prior)")
+plt.savefig(output_dir + "vague_prior_diff_prob_comparison.png")
+print("Correlation: " + str(np.corrcoef(diff_prob, vague_diff_prob)[0,1]))
+
+# %% plot vague vs mcmc diff prob
+
+f = plt.scatter(mcmc_diff_prob, vague_diff_prob, alpha = 0.3, s = 1)
+plt.axline((0, 0), slope=1, color='black', linestyle='--')
+print("Correlation: " + str(np.corrcoef(mcmc_diff_prob, vague_diff_prob)[0,1]))
+
+# %% write output
+
+gamma_means = np.mean(gamma, axis = 1)
+
+out = {
+    "county1": [data_shp.iloc[i]['County_FIPS'] for (i, j) in edge_list],
+    "county1_gamma_mean": [gamma_means[0,i] for (i, j) in edge_list],
+    "county2": [data_shp.iloc[j]['County_FIPS'] for (i, j) in edge_list],
+    "county2_gamma_mean": [gamma_means[0,j] for (i, j) in edge_list],
+    "optim_e": np.repeat(optim_e, len(edge_list)),
+    "cutoff_prob": np.repeat(cutoff_prob, len(edge_list)),
+    "approx_diff_prob": diff_prob.squeeze(),
+    "mcmc_diff_prob": mcmc_diff_prob.squeeze(),
+    "vague_diff_prob": vague_diff_prob.squeeze(),       
+}
+out = pd.DataFrame(out)
+out['higher_gamma_mean_county'] = np.where(
+    out['county1_gamma_mean'] > out['county2_gamma_mean'],
+    out['county1'], out['county2'])
+out.to_csv(output_dir + "diff_probs.csv", index = False)
+
+
+# %% simulate dataset for baseline mcmc assessment
+
+lambda_rho = 0
+tau_beta = np.sqrt(n / 5.0)
+sigma2_prior_sd = np.sqrt(1.0)
+theta_isotropic = True
+prior, likelihood, _ = bym2_sim.BYM2_simulators(
+    Lambda_scaled, A_scaled, A_scaled, lambda_rho, p,
+    rng = rng,
+    corrupt_residual = False,
+    beta_loc = 0.0,
+    tau_beta = tau_beta,
+    sigma2_sd = sigma2_prior_sd,
+    fix_X = True, X = X_scaled,
+    R_x = R_x, theta_isotropic = theta_isotropic)
+simulator = bf.simulators.SequentialSimulator([
+    bf.simulators.LambdaSimulator(prior, is_batched=True),
+    bf.simulators.LambdaSimulator(likelihood, is_batched=True)
+])
+baseline_dataset = pd.DataFrame({
+    'y': simulator.sample(1)['y'].squeeze()
+    })
+baseline_dataset.to_csv("output/RDA/baseline_data.csv", index = False)
+
+# %% speed comparison
+
+data = simulator.sample(200)
+n_samples = 8000
+post_draws = approximator.sample(conditions=data, num_samples=n_samples,
+                                      batch_size = 5)

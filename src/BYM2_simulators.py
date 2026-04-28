@@ -141,9 +141,11 @@ def BYM2_prior(n_samples: int,
     return dict(beta = beta,
                 theta = theta,
                 beta_corrupted = beta_corrupted,
+                sigma2 = sigma2,
                 log_sigma2 = np.log(sigma2), 
                 beta_signlog = beta_signlog,
                 beta_arcsinh = beta_arcsinh,
+                rho = rho,
                 logit_rho = logit(rho))
 
 def generate_CAR_covariates(n_samples, n, p, A_x, rng):
@@ -237,60 +239,5 @@ def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
     return prior, likelihood, X
 
 if __name__ == "__main__":
-    import shp_reader
-    import matplotlib.pyplot as plt
-    # set filepath to US county shapefile
-    print("Reading in CA county shapefile...")
-    fp = "../data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
-    # read in shapefile and adjancency matrix of mainland US counties
-    us_mainland, W = shp_reader.read_CA_shapefile(fp)
-    print("Done! Constructing CAR covariance matrix using US county map...")
-    # convert contiguity object to dense matrix
-    W_full = W.full()[0]
-    D = np.diag(np.sum(W_full, axis=1))
-    Q = D - 0.99 * W_full
-    n = Q.shape[0]
-    # Eigendecomposition (Q = P * diag(Lambda) * P^{T})
-    Lambda, P = np.linalg.eig(Q)
-    # A = P * Lambda^{-1/2}
-    # Q^{-1} = AA^{T}
-    A = P @ np.diag(np.pow(Lambda, -0.5))
-    Sigma = A @ A.transpose()
-    scaling_factor = np.exp(np.mean(np.log(Sigma.diagonal())))
-    Q_scaled = scaling_factor * Q
-    Sigma_scaled = (1.0 / scaling_factor) * Sigma
-    A_scaled = np.pow(scaling_factor, -0.5) * A
-    Lambda_scaled = Lambda * scaling_factor
-    print("Done! Generating sample from CAR prior...")
-    rng = np.random.default_rng(seed = 11301)
-    z = CAR_prior(1, A_scaled, rng)
-    us_mainland["z"] = z.squeeze()
-    us_mainland.plot(column = "z", legend = True)
-    plt.title("Simulated CAR Random Effects")
-    print("Done! Generating 10 samples from PC prior on",
-          "spatial variance proportion...")
-    n_samples = (10,)
-    rho, proposed_samples = PC_prior(n_samples = n_samples[0], lambda_rho = 0.005, 
-                                     Lambda = Lambda_scaled, rng = rng)
-    print("Sampled rho:", rho, "| Proposed samples:", proposed_samples)
-    print("Simulating from BYM2 prior with 6 covariates...")
-    p = 6
-    lambda_rho = 0.003
-    prior, likelihood, fix_X = BYM2_simulators(Lambda_scaled, A_scaled, 
-                                               A_scaled, lambda_rho, p,
-                                               rng)
-    params = prior(n_samples)
-    print(params)
-    print("Simulating from BYM2 likelihood using sampled parameters...")
-    data = likelihood(n_samples,
-                      params["beta"], 
-                      params["beta_corrupted"],
-                      params["log_sigma2"],
-                      params["logit_rho"])
-    print(data)
-    # plot first dataset
-    ca_shp = us_mainland.query("STATEFP == '06'")
-    us_mainland["y"] = data["y"][0,:,:]
-    us_mainland.plot(column = "y", legend = True)
-    plt.title("Simulated Response")
+    pass
     

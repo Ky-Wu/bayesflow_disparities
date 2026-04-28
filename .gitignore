@@ -8,3 +8,5 @@ output/
 data/
 build/
 test/test_settings.py
+old/
+.Rhistory

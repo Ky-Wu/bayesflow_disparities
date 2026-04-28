@@ -86,6 +86,6 @@ def read_CAORWA_shapefile(fp):
 
 if __name__ == "__main__":
     # set filepath to US county shapefile
-    fp = "../data/cb_2017_us_county_500k/cb_2017_us_county_500k.shp"
+    fp = "../data/cb_2014_us_county_500k/cb_2014_us_county_500k.shp"
     us_mainland, W = read_US_shapefile(fp)
 

@@ -25,8 +25,7 @@ parameters {
 
 model {
   // Priors
-  theta ~ normal(0.0, sqrt(sigma2) * sqrt(N / 5.0));
-  sigma2 ~ normal(0, 1);
+  sigma2 ~ inv_gamma(0.01, 0.01);
   rho ~ beta(1, 1);
 
   // Marginal Likelihood in rotated space

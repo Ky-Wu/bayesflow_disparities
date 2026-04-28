@@ -16,7 +16,8 @@ def sample_gamma_posterior(beta: np.array,
                            y: np.array,
                            Lambda: np.array,
                            P: np.array,
-                           rng = None):
+                           rng = None,
+                           subset_indx = None):
     """
     
 
@@ -36,6 +37,8 @@ def sample_gamma_posterior(beta: np.array,
         (N,) eigenvalues of CAR precision matrix
     P : np.array
         (N, N) eigenvectors of CAR precision matrix
+    subset_indx : list
+        list of row indices of gamma to return (default: returns all samples)
 
     Returns
     -------
@@ -45,11 +48,11 @@ def sample_gamma_posterior(beta: np.array,
     """
     batch_size, n_s, _ = beta.shape
     N = Lambda.shape[0]
-    p = X.shape[1] - 1
     
     gamma = y - X @ beta.transpose((0,2,1))
     gamma = P.T @ gamma
-    gamma = (1.0 / ((1.0 - rho) / rho * Lambda + 1.0)).transpose((0,2,1)) * gamma
+    c1 = (1.0 / ((1.0 - rho) / rho * Lambda + 1.0))
+    gamma = c1.transpose((0,2,1)) * gamma
     
     noise = (Lambda / rho)
     noise += (1.0 / (1.0 - rho))
@@ -57,8 +60,11 @@ def sample_gamma_posterior(beta: np.array,
     noise = noise * rng.standard_normal((batch_size, n_s, N))
     noise = np.sqrt(sigma2) * noise
     
-    gamma = P @ (gamma + noise.transpose((0, 2, 1)))
+    if (subset_indx is None):
+        subset_indx = range(N)
     
+    gamma = P[subset_indx,:] @ (gamma + noise.transpose((0, 2, 1)))
+
     return gamma.transpose((0, 2, 1))
 
 def compute_std_diff(gamma: NDArray[tuple[int, int, int]],

@@ -24,11 +24,11 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from libpysal.weights import Rook
                          
-shp_fp = os.path.join(cwd, "data", "cb_2017_us_county_500k", "cb_2017_us_county_500k.shp")
+shp_fp = os.path.join(cwd, "data", "cb_2014_us_county_500k", "cb_2014_us_county_500k.shp")
 data_fp = os.path.join(cwd, "output", "RDA", "data_cleaned.csv")
 model_name = "US_lungcancer"
-output_dir = os.path.join(cwd, "output", "RDA", "joint_network_v4/")
-output_fp = os.path.join(cwd, "checkpoints", (model_name + "_net_v4.keras"))
+output_dir = os.path.join(cwd, "output", "RDA", "joint_network_v8/")
+output_fp = os.path.join(cwd, "checkpoints", (model_name + "_net_v8.keras"))
 rng = np.random.default_rng(seed = 1130)
 
 
@@ -73,7 +73,7 @@ n = Q_scaled.shape[0]
 # %% prior hyperparameters
 
 # zellner-g prior settings
-tau_beta = np.sqrt(n / 10.0)
+tau_beta = np.sqrt(n / 5.0)
 sigma2_prior_sd = np.sqrt(1.0)
 theta_isotropic = True
 
@@ -108,17 +108,7 @@ adapter = (
     .concatenate(["y"], into="summary_variables")
 )
 
-# Graph neural network as summary network (spatial data not row-exchangeable)
-
-"""
-summary_net = summary_networks.SummaryGNNPlusIdentity(
-    adjacency_matrix = W_full,
-    gnn_dim = 32,
-    compress_dim = 128,
-    hidden_dim = 64,
-    summary_dim = 32)
-"""
-
+# Custom summary network (spatial data not row-exchangeable)
 
 summary_net = summary_networks.ResidualSummary(
     adjacency_matrix = W_full,
@@ -128,15 +118,16 @@ summary_net = summary_networks.ResidualSummary(
     hidden_dim = 128,
     summary_dim = 64)
 
+#summary_net = summary_networks.SummaryIdentity()
+
 # %% define inference network and amortizer
 
 depth = 8
 inference_net = bf.networks.CouplingFlow(
     depth=depth,
-    permutation = None,
     transform = "affine",   
     subnet_kwargs={
-       "units": [1024, 512, 256],  # Widths of the hidden layers
+       "units": [1024, 1024, 1024],  # Widths of the hidden layers
        "activation": "swish",
        "dropout": False,
        "dropout_prob": 0.0
@@ -161,7 +152,6 @@ history = workflow.fit_online(epochs = 400,
                               num_batches_per_epoch = 100,
                               validation_data = 64,
                               callbacks = [bfhelp.CleanLRLogger()],
-                              checkpoint_path = "checkpoints",
                               verbose = 2)
 bf.diagnostics.plots.loss(history)
 
@@ -175,7 +165,7 @@ approximator = keras.saving.load_model(output_fp)
 
 # %% check diagnostics
 
-num_samples = 1000
+num_samples = 2000
 val_sims = simulator.sample(500)
 post_draws = approximator.sample(conditions=val_sims, num_samples=num_samples,
                                       batch_size = 5)
@@ -184,14 +174,14 @@ post_draws = approximator.sample(conditions=val_sims, num_samples=num_samples,
 
 post_draws = {
     'beta' : bfhelp.backtransform_beta_samps(post_draws, R_x = R_x),
-    'log_sigma2' : post_draws['log_sigma2'],
-    'logit_rho' : post_draws['logit_rho']
+    'sigma2' : np.exp(post_draws['log_sigma2']),
+    'rho' : 1.0 / (1.0 + np.exp(-post_draws['logit_rho']))
     }
 
 # %% plot diagnostics
 
 par_names = [rf"$\beta_{{{i}}}$" for i in range(p + 1)]
-par_names += r"$\text{log}(\sigma^2)$", r"$\text{logit}(\rho)$"
+par_names += r"$\sigma^2$", r"$\rho$"
 f = bf.diagnostics.plots.pairs_posterior(
     estimates=post_draws, 
     targets=val_sims,

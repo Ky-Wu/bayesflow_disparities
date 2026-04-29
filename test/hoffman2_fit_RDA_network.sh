@@ -36,10 +36,10 @@ echo "----------------------------------------------------------------"
 
 python -u -m src.RDA_data_setup
 
-# 3. Fit chained posterior approximators
+# 3. Fit neural posterior estimator
 
 echo "----------------------------------------------------------------"
-echo "Fitting Posterior Approximator to Lung Cancer Data"
+echo "Fitting NPE to Lung Cancer Data"
 echo "----------------------------------------------------------------"
 
 python -u -m src.RDA_fit_joint_network

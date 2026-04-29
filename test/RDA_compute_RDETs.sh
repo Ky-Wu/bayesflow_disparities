@@ -13,18 +13,9 @@ cd "$PROJECT_ROOT"
 
 echo "Running from: $(pwd)"
 
-# 2. Clean and aggregate data
-
 echo "----------------------------------------------------------------"
-echo "Cleaning and setting up Lung Cancer Dataset"
+echo "Computing RDETs for Reported Disparities"
 echo "----------------------------------------------------------------"
+echo "Running src/RDA_compute_RDETs.py from: $(pwd)"
 
-python -u -m src.RDA_data_setup
-
-# 3. Fit chained posterior approximators
-
-echo "----------------------------------------------------------------"
-echo "Fitting Chained Approximators to Lung Cancer Data"
-echo "----------------------------------------------------------------"
-
-python -u -m src.RDA_fit_beta_network
+python -u -m src.RDA_compute_RDETs

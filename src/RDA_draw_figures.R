@@ -80,7 +80,7 @@ map <- ggplot() +
   coord_sf(crs = st_crs(5070)) +
   theme_bw() +
   theme(legend.position = "bottom", legend.title=element_text(size=10))
-map
+#map
 
 ggsave(file.path(output_fp, "disparities_map.png"), map, dpi = 300,
        width = 8, height = 5)
@@ -105,7 +105,7 @@ RDET_map <- ggplot() +
   theme_bw() +
   theme(legend.position = "bottom",
         legend.key.width = unit(1.5, "cm"))
-RDET_map
+#RDET_map
 
 ggsave(file.path(output_fp, "RDET_map.png"), RDET_map, dpi = 300,
        width = 8, height = 5)
@@ -218,7 +218,7 @@ var_CI_graph <- ggplot(data = all_var_summary) +
   coord_flip() +
   labs(x = "Variance Parameter", y = "Value") +
   theme_bw(base_size = 13)
-var_CI_graph
+#var_CI_graph
 
 CI_graphs <- ggpubr::ggarrange(beta_CI_graph, var_CI_graph,
                   legend = "bottom", common.legend = TRUE)

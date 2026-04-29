@@ -11,5 +11,3 @@ test/test_settings.py
 old/
 .Rhistory
 examples/
-!output/RDA
-!output/RDA/joint_network_v8/

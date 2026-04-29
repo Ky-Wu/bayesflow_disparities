@@ -4,10 +4,12 @@ data/cb_2017_us_county_500k/
 **/__pycache__/
 src/__pycache__
 checkpoints/
-output/
+output/*
 data/
 build/
 test/test_settings.py
 old/
 .Rhistory
 examples/
+!output/RDA
+!output/RDA/joint_network_v8/

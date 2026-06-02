@@ -40,7 +40,7 @@ p2 <- ggplot(data = diff_probs) +
        y = "MCMC Difference Probability (Same Prior)") +
   theme_bw()
 
-p <- ggpubr::ggarrange(p1, p2)
+p <- ggpubr::ggarrange(p2, p1)
 
 ggsave(file.path(output_fp, "vague_mcmc_comparison.png"), p1, dpi = 300)
 ggsave(file.path(output_fp, "mcmc_comparison.png"), p2, dpi = 300)
@@ -120,13 +120,13 @@ output_df <- data.frame(
   min_RDET = RDET_f
 )
 output_df <- output_df[order(p_decrease, decreasing = TRUE),]
-colnames(output_df) <- c("High Residual Mortality County", "RDET (% decrease)")
+colnames(output_df) <- c("Higher Residual Mortality County", "RDET (% decrease)")
 caption <- paste0("Counties that have a detected disparity with a neighboring ",
                   "county and carry a higher posterior mean spatial ",
                   "residual are reported as high residual mortality counties. ",
                   "For each detected disparity, we compute the Residual Disparity ",
                   "Elimination Target (RDET), defined as the minimum mortality rate ",
-                  "at which the high residual mortality county would not be classified ",
+                  "at which the higher residual mortality county would not be classified ",
                   "as a disparity with a neighboring county, using the trained ",
                   "neural posterior estimator. The reported RDET is the minimum ",
                   "value across all disparities for a given high residual mortality county.")
@@ -224,3 +224,46 @@ CI_graphs <- ggpubr::ggarrange(beta_CI_graph, var_CI_graph,
                   legend = "bottom", common.legend = TRUE)
 
 ggsave(file.path(output_fp, "CI_graphs.png"), CI_graphs, dpi = 300)
+
+# full disparity table
+
+county1_names <- shp[match(diff_probs$county1, shp$County_FIP),]$location
+county2_names <- shp[match(diff_probs$county2, shp$County_FIP),]$location
+high_risk_region <- ifelse(diff_probs$county1 == diff_probs$higher_gamma_mean_county,
+                           county1_names, county2_names)
+low_risk_region <- ifelse(diff_probs$county1 == diff_probs$higher_gamma_mean_county,
+                           county2_names, county1_names)
+temp <- data.frame(
+  high_risk = high_risk_region,
+  low_risk = low_risk_region,
+  county1 = diff_probs$county1,
+  county2 = diff_probs$county2,
+  diff_prob = diff_probs$approx_diff_prob
+)
+
+disparity_table <- merge(temp, RDET_df,
+                         by = c("county1", "county2"))
+indx <- match(disparity_table$higher_gamma_mean_county, shp$County_FIP)
+RDET_rates <- round(disparity_table$reduction_factor * shp$mortality2[indx], 1)
+p_decrease <- round(disparity_table$RDET_percent, 1)
+disparity_table$RDET_f <- paste0(RDET_rates, " (", p_decrease, "%)")
+#disparity_table[is.na(disparity_table$RDET_percent),]$RDET_f <- "--"
+disparity_table <- disparity_table[order(disparity_table$RDET_percent, decreasing = TRUE),]
+disparity_table <- disparity_table[, c("high_risk", "low_risk", "diff_prob", "RDET_f")]
+colnames(disparity_table) <- c("Higher Residual Mortality County", "Lower Residual Mortality County",
+                               "$v_{ij}(\\epsilon_{\\star}$)", "RDET (\\% decrease)")
+caption <- paste0("Reported spatial disparities and Residual Disparity Elimination Targets (RDETs) ",
+                  "between neighboring counties from boundary analysis ",
+                  "of 2014 US county-level ",
+                  "tracheal, bronchus, and lung cancer mortality rates. ",
+                  "The RDET is the minimum reduction in mortality rate ",
+                  "at which the higher residual mortality county would not be classified ",
+                  "as a disparity with the neighboring county. ",
+                  "Boundary analysis was conducted using ",
+                  "a Bayesian spatial regression model and posterior samples were obtained using ",
+                  "a trained neural posterior estimator.")
+print(xtable::xtable(disparity_table, caption = caption,
+                     label = "tab:full_disparity_table", align = c("l", rep("c", ncol(disparity_table)))),
+      type = "latex", include.rownames = FALSE, booktabs = TRUE, escape = FALSE,
+      tabular.environment = "longtable", floating = FALSE,
+      file.path(output_fp, "full_disparity_table.tex"), sanitize.colnames.function = identity)

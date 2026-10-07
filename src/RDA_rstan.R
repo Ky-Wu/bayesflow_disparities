@@ -55,9 +55,11 @@ Q_x <- qr.Q(qr_res)
 R_x <- qr.R(qr_res)
 stan_data <- list(Q_x = Q_x, Y = y, p = p, N = N, Sigma_chol = Sigma_chol)
 
+model <- rstan::stan_model(file = model_fp)
+
 runtime <- system.time({
-  fit <- rstan::stan(file = model_fp, data = stan_data,
-                     iter = 3000, warmup = 1000, chains = 4)
+  fit <- rstan::sampling(model, data = stan_data,
+                         iter = 3000, warmup = 1000, chains = 4)
 })
 print(runtime)
 print(fit)

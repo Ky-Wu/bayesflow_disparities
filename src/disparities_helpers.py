@@ -17,7 +17,8 @@ def sample_gamma_posterior(beta: np.array,
                            Lambda: np.array,
                            P: np.array,
                            rng = None,
-                           subset_indx = None):
+                           subset_indx = None,
+                           PtX: np.array = None):
     """
     
 
@@ -46,11 +47,16 @@ def sample_gamma_posterior(beta: np.array,
         (batch_size, n_s, N)
 
     """
+    
+    if PtX is None:
+        PtX = P.T @ X
+        
     batch_size, n_s, _ = beta.shape
     N = Lambda.shape[0]
     
-    gamma = y - X @ beta.transpose((0,2,1))
-    gamma = P.T @ gamma
+    PtY = P.T @ y
+    gamma = PtY - PtX @ beta.transpose((0,2,1))
+    
     c1 = (1.0 / ((1.0 - rho) / rho * Lambda + 1.0))
     gamma = c1.transpose((0,2,1)) * gamma
     

@@ -14,6 +14,10 @@ import keras
 import bayesflow as bf
 from keras import layers, ops
 import numpy as np
+import scipy.sparse as sp
+import scipy.linalg as spla
+import jax.numpy as jnp
+
 
 class FlatteningNet(bf.networks.SummaryNetwork):
     def __init__(self, input_shape, **kwargs):
@@ -207,7 +211,6 @@ class SummaryGNNPlusIdentity(SummaryGNN):
         result = super().call(x, **kwargs)
         return ops.concatenate([result, x.squeeze(-1)], axis = -1)
         
-    
 @keras.saving.register_keras_serializable(package="BayesflowSpatialSummary")
 class ResidualSummary(bf.networks.SummaryNetwork):
     def __init__(self, adjacency_matrix, X,
@@ -217,58 +220,91 @@ class ResidualSummary(bf.networks.SummaryNetwork):
                  summary_dim=32, **kwargs):
         super().__init__(**kwargs)
         
-        # save input arguments for recovery in config
+        # Save input arguments for recovery in config
         self.adjacency_matrix = np.asarray(adjacency_matrix)
         self.X = np.asarray(X)
+        self.num_nodes = self.adjacency_matrix.shape[0]
         self.gnn_dim = gnn_dim
         self.compress_dim = compress_dim
         self.hidden_dim = hidden_dim
         self.summary_dim = summary_dim
         
-        XtX = X.T @ X
-        XtX_chol = ops.linalg.cholesky(XtX, upper = False)
-        XtXcholXt = ops.linalg.solve_triangular(XtX_chol, X.T, lower= True)
-        H = XtXcholXt.T @ XtXcholXt
-        self.I_H = ops.eye(H.shape[0]) - H
+        # --- Factorized Residual Projection ---
+        XtX = self.X.T @ self.X
+        XtX_chol = np.linalg.cholesky(XtX)
         
-        # --- 1. Precompute Constants ---
-        A_tilde = adjacency_matrix + np.eye(adjacency_matrix.shape[0])
-        d = np.array(A_tilde.sum(1))
-        d_inv_sqrt = np.power(d, -0.5).flatten()
-        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
-        D_inv_sqrt = np.diag(d_inv_sqrt)
+        self.C = spla.solve_triangular(XtX_chol, self.X.T, lower=True)
         
-        # Use keras.ops for backend-agnostic constants
-        self.A_norm = ops.cast(D_inv_sqrt @ A_tilde @ D_inv_sqrt, dtype="float32")
-        L = np.diag(np.array(adjacency_matrix.sum(1))) - adjacency_matrix
-        self.L_tensor = ops.cast(L, dtype="float32")
+        self.C_tensor = ops.cast(self.C, dtype="float32")       # Shape: (K, N)
+        self.C_T_tensor = ops.cast(self.C.T, dtype="float32")   # Shape: (N, K)
         
-        # --- 2. Layers ---
-
-        #self.rough_compress = layers.Dense(compress_dim)
+        # --- Scipy Edge-List Precomputation ---
+        A = sp.csr_matrix(self.adjacency_matrix)
+        A_tilde = A + sp.eye(self.num_nodes)
+        
+        # Safe inverse square root for degree matrix
+        d = np.array(A_tilde.sum(axis=1)).flatten()
+        d_inv_sqrt = np.divide(1.0, np.sqrt(d), out=np.zeros_like(d), where=d>0)
+        D_inv_sqrt = sp.diags(d_inv_sqrt)
+        
+        A_norm_sp = D_inv_sqrt @ A_tilde @ D_inv_sqrt
+        L_sp = sp.diags(np.array(A.sum(axis=1)).flatten()) - A
+        
+        # Extract edge lists (COO format gives us row, col, and data natively)
+        A_norm_coo = A_norm_sp.tocoo()
+        self.A_senders = ops.cast(A_norm_coo.col, dtype="int32")
+        self.A_receivers = ops.cast(A_norm_coo.row, dtype="int32")
+        self.A_weights = ops.cast(A_norm_coo.data, dtype="float32")
+        
+        L_coo = L_sp.tocoo()
+        self.L_senders = ops.cast(L_coo.col, dtype="int32")
+        self.L_receivers = ops.cast(L_coo.row, dtype="int32")
+        self.L_weights = ops.cast(L_coo.data, dtype="float32")
+        
+        # --- Layers ---
         self.fc_1 = layers.Dense(gnn_dim)
         self.fc_2 = layers.Dense(gnn_dim)
         self.compress = layers.Dense(compress_dim)
         self.smooth_compress = layers.Dense(compress_dim)
         self.fc_hidden = layers.Dense(hidden_dim)
         self.fc_out = layers.Dense(summary_dim)
-    def call(self, x, **kwargs):
-        # input raw data y and process into summary statistics of residuals
-        # r = y - X\hat{\beta} = (I - X(X^{\T}X)^{-1}X^{T})y
+
+    def _edge_list_matmul(self, senders, receivers, weights, dense_tensor):
+        """
+        Computes sparse graph multiplication using message passing and JAX scatter-add.
+        dense_tensor shape: (Batch, Nodes, Features)
+        """
+        # 1. Gather sender features: (Batch, NumEdges, Features)
+        h_senders = dense_tensor[:, senders, :]
         
-        r = ops.matmul(self.I_H, x)
+        # 2. Multiply by edge weights (broadcasted over Batch and Features dimensions)
+        w = ops.reshape(weights, (1, -1, 1))
+        messages = h_senders * w
+        
+        # 3. Aggregate at receivers using JAX's native, differentiable scatter-add
+        # We use jnp.zeros_like to safely handle Keras dynamic batch sizing during tracing
+        out = jnp.zeros_like(dense_tensor)
+        out = out.at[:, receivers, :].add(messages)
+        
+        return out
+
+    def call(self, x, **kwargs):
+        # Step 1: O(N*K) Residual calculation
+        # Safely handles batched 3D inputs without instantiating an N x N matrix
+        C_x = ops.einsum('kn,bnf->bkf', self.C_tensor, x)
+        H_x = ops.einsum('nk,bkf->bnf', self.C_T_tensor, C_x)
+        r = x - H_x
+        
         h = keras.activations.swish(self.fc_1(r))
         h = keras.activations.swish(self.fc_2(h))
         
-        # Step 2: Spatial Filtering (Using ops.matmul)
-        h_spatial = ops.matmul(self.A_norm, h)
-        h_rough = ops.matmul(self.L_tensor, h)
+        # Step 2: Spatial Filtering (Using Edge-List Message Passing)
+        h_spatial = self._edge_list_matmul(self.A_senders, self.A_receivers, self.A_weights, h)
+        h_rough = self._edge_list_matmul(self.L_senders, self.L_receivers, self.L_weights, h)
         h_residual = h - h_spatial
         
         # Step 3: Branch Compression
         batch_size = ops.shape(x)[0]
-        
-        # Reshape + Compress
         f = keras.activations.swish(
             self.compress(ops.reshape(h, (batch_size, -1)))
         )
@@ -276,32 +312,24 @@ class ResidualSummary(bf.networks.SummaryNetwork):
             self.smooth_compress(ops.reshape(h_spatial, (batch_size, -1)))
         )
         
-        # Step 4: Global Stats (Backend-agnostic)
-        #y_scale_log = ops.log(ops.std(x[:, :, -1:], axis=1))
+        # Step 4: Global Stats
         sigma_nugget = ops.std(h_residual, axis=1)
         tau_spatial = ops.std(h_rough, axis=1)
         
-        
-        # Step 5: Additional Spatial Statistics
-
-        # 5a. The Rayleigh Quotient (Graph Frequency)
-        # Formula: (h^T L h) / (h^T h)
-        # numerator: h * (L @ h) -> then sum over nodes
-        # denominator: h * h -> then sum over nodes
-        # Shape: (batch, 64)
+        # Step 5: The Rayleigh Quotient (Graph Frequency)
         rayleigh_stat = ops.sum(h * h_rough, axis=1) \
             / (ops.sum(ops.square(h), axis=1) + 1e-8)
         
-        # Step 5: Concatenate and Project
+        # Step 6: Concatenate and Project
         summary = ops.concatenate([
             f, f_smooth,
             rayleigh_stat,
             sigma_nugget,
             tau_spatial
-            #y_scale_log, geary_stat, moran_stat
         ], axis=-1)
         
         summary_hidden = keras.activations.swish(self.fc_hidden(summary))
+        
         # include observations y
         result = ops.concatenate([
             x.squeeze(-1), self.fc_out(summary_hidden)

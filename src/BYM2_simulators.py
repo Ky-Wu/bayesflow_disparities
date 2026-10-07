@@ -10,6 +10,7 @@ import src.bayesflow_helpers as bfhelp
 import numpy as np
 from scipy.special import expit, logit
 from scipy.linalg import solve_triangular
+from scipy import sparse
 
 def CAR_prior(n_samples: int,
               A: np.array,
@@ -238,6 +239,152 @@ def BYM2_simulators(Lambda, A_y, A_x, lambda_rho, p,
         
     return prior, likelihood, X
 
+def compute_spatial_operators(W: np.array) -> dict:
+    """
+    Precompute the spatial filtering operator derived from a (fixed)
+    adjacency matrix W: the symmetrically-normalized adjacency (with
+    self-loops), stored as a sparse CSR matrix.
+ 
+    This depends only on W, not on any sampled data, so it should be
+    computed once per adjacency matrix rather than inside a per-sample
+    function like local_spatial_statistics.
+ 
+    A sparse representation matters a lot here: for typical spatial
+    adjacency (each region touching a handful of neighbors), a dense
+    (n, n) matmul costs O(n^2 * batch) while the sparse version costs
+    O(nnz * batch) -- often a 100-1000x reduction for n in the thousands.
+ 
+    Parameters
+    ----------
+    W : np.array
+        Adjacency matrix, shape (n, n).
+ 
+    Returns
+    -------
+    dict
+        A_norm - symmetrically-normalized adjacency (with self-loops),
+                 as a scipy.sparse.csr_matrix of shape (n, n).
+    """
+    W = np.asarray(W, dtype=float)
+    n = W.shape[0]
+ 
+    A_tilde = W + np.eye(n)
+    d = A_tilde.sum(axis=1)
+    d_inv_sqrt = np.power(d, -0.5)
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    D_inv_sqrt = np.diag(d_inv_sqrt)
+    A_norm = D_inv_sqrt @ A_tilde @ D_inv_sqrt
+ 
+    A_norm_sparse = sparse.csr_matrix(A_norm.astype(np.float32))
+ 
+    return dict(A_norm=A_norm_sparse)
+ 
+ 
+def local_spatial_statistics(batch_size,
+                              y: np.array,
+                              A_norm) -> dict:
+    """
+    Compute closed-form local (per-node) spatial summary statistics directly
+    from observed data y and a precomputed spatial operator - without
+    routing through any learned/MLP layers.
+ 
+    Batched version: y is expected with a leading batch dimension, shape
+    (batch, n, 1) (or (batch, n)). A_norm is a sparse (n, n) operator
+    shared across the whole batch. Rather than relying on dense broadcasting
+    (which would redo an O(n^2) matmul per batch), y is reshaped once to
+    (n, batch) so the whole batch is filtered in a single sparse-dense
+    matrix multiply.
+ 
+    Only spatial_lag and its cheap (elementwise) derivatives are computed
+    here - the Laplacian-based statistics (laplacian_filter, local_roughness,
+    local_rayleigh) have been dropped since they required a second,
+    equally expensive full matmul (L @ y) for comparatively little extra
+    information beyond what spatial_lag/high_freq/local_moran/local_nugget
+    already capture. Re-add compute_spatial_operators' L and this
+    function's original Laplacian-derived terms if you need them and can
+    afford the extra matmul.
+ 
+    Note: this operates on y directly rather than the OLS residual
+    (I - H) y. Since X is fixed/broadcast identically across samples in
+    this simulator, residualizing per sample would be wasted work for an
+    identical result; using y avoids that cost entirely. If you later use
+    a simulator where X genuinely varies per sample, residualize against X
+    once per unique X (or upstream, in the likelihood step) rather than
+    inside this function.
+ 
+    Parameters
+    ----------
+    batch_size : tuple
+        Batch size passed by LambdaSimulator when is_batched=True. Unused -
+        the shape of y already determines the batch dimension.
+    y : np.array
+        Response array, shape (batch, n, 1) or (batch, n).
+    A_norm : scipy.sparse.csr_matrix
+        Precomputed symmetrically-normalized adjacency matrix, shape (n, n).
+ 
+    Returns
+    -------
+    dict
+        Dictionary of per-node (batch, n, 1) arrays:
+        spatial_lag  - normalized-adjacency-smoothed y
+        high_freq    - y minus its spatial lag
+        local_moran  - local Moran's I / LISA statistic
+        local_nugget - squared high-frequency component
+    """
+    y = np.asarray(y, dtype=np.float32)
+    if y.ndim == 1:
+        y = y[np.newaxis, :, np.newaxis]   # (n,) -> (1, n, 1)
+    elif y.ndim == 2:
+        y = y[..., np.newaxis]             # (batch, n) -> (batch, n, 1)
+ 
+    batch, n, _ = y.shape
+ 
+    # --- One sparse-dense matmul for the whole batch at once ---
+    # (n, n) sparse @ (n, batch) dense -> (n, batch), instead of looping
+    # or broadcasting a dense (n, n) matrix batch_size times.
+    y_2d = y.reshape(batch, n).T            # (n, batch)
+    y_spatial_2d = A_norm.dot(y_2d)         # (n, batch)
+    y_spatial = y_spatial_2d.T[..., np.newaxis]  # (batch, n, 1)
+ 
+    y_highfreq = y - y_spatial
+ 
+    # --- Closed-form local (per-node) statistics: elementwise, no matmul ---
+    local_moran = y * y_spatial
+    local_nugget = np.square(y_highfreq)
+ 
+    return dict(
+        spatial_lag=y_spatial,
+        high_freq=y_highfreq,
+        local_moran=local_moran,
+        local_nugget=local_nugget,
+    )
+ 
+ 
+def make_local_spatial_statistics_fn(W: np.array):
+    """
+    Bind a fixed adjacency matrix's derived spatial operator into a
+    ready-to-use batched simulator function, so W/A_norm never need to
+    be produced by (or flow through) the simulator pipeline itself.
+ 
+    Parameters
+    ----------
+    W : np.array
+        Adjacency matrix, shape (n, n). Computed once, here, not per batch.
+ 
+    Returns
+    -------
+    callable
+        A function `fn(batch_size, y)` suitable for
+        `bf.simulators.LambdaSimulator(fn, is_batched=True)`.
+    """
+    spatial_ops = compute_spatial_operators(W)  # {"A_norm": <sparse csr>}
+ 
+    def _fn(batch_size, y):
+        return local_spatial_statistics(batch_size, y, **spatial_ops)
+ 
+    return _fn
+
 if __name__ == "__main__":
     pass
+
     

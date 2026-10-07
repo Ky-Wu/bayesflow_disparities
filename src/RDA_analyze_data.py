@@ -31,8 +31,8 @@ import rdata
 shp_fp = "data/cb_2014_us_county_500k/cb_2014_us_county_500k.shp"
 data_fp = "output/RDA/data_cleaned.csv"
 model_name = "US_lungcancer"
-output_dir = "output/RDA/joint_network_v8/"
-net_fp = Path("checkpoints") / (model_name + "_net_v8.keras")
+output_dir = "output/RDA/joint_network_v9/"
+net_fp = Path("checkpoints") / (model_name + "_net_v9.keras")
 
 rng = np.random.default_rng(seed = 1130)
 
@@ -176,13 +176,6 @@ edge_list = np.argwhere(np.triu(W_full, k = 1) > 0).tolist()
 
 diffs = disp.gamma_diffs_marginalvar(gamma, sigma2, rho, edge_list)
 
-"""
-# %%
-
-diffs = disp.compute_std_diff(gamma, sigma2, rho, 
-                                         X_scaled, Lambda, P,
-                                         edge_list)
-"""
 
 # %% optimize epsilon loss criterion
 

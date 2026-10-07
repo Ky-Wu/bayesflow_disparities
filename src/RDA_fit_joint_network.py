@@ -27,8 +27,8 @@ from libpysal.weights import Rook
 shp_fp = os.path.join(cwd, "data", "cb_2014_us_county_500k", "cb_2014_us_county_500k.shp")
 data_fp = os.path.join(cwd, "output", "RDA", "data_cleaned.csv")
 model_name = "US_lungcancer"
-output_dir = os.path.join(cwd, "output", "RDA", "joint_network_v8/")
-output_fp = os.path.join(cwd, "checkpoints", (model_name + "_net_v8.keras"))
+output_dir = os.path.join(cwd, "output", "RDA", "joint_network_v9/")
+output_fp = os.path.join(cwd, "checkpoints", (model_name + "_net_v9.keras"))
 rng = np.random.default_rng(seed = 1130)
 
 
@@ -127,7 +127,7 @@ inference_net = bf.networks.CouplingFlow(
     depth=depth,
     transform = "affine",   
     subnet_kwargs={
-       "units": [1024, 1024, 1024],  # Widths of the hidden layers
+       "widths": [128, 128],  # Widths of the hidden layers
        "activation": "swish",
        "dropout": False,
        "dropout_prob": 0.0
@@ -151,8 +151,8 @@ history = workflow.fit_online(epochs = 400,
                               batch_size = 64,
                               num_batches_per_epoch = 100,
                               validation_data = 64,
-                              callbacks = [bfhelp.CleanLRLogger()],
-                              verbose = 2)
+                              callbacks = [bfhelp.CleanLRLogger()])
+                              #verbose = 2)
 bf.diagnostics.plots.loss(history)
 
 # %% save network
@@ -238,8 +238,8 @@ post_draws = approximator.sample(conditions=data, num_samples=num_samples,
 
 post_draws = {
     'beta' : bfhelp.backtransform_beta_samps(post_draws, R_x = R_x),
-    'log_sigma2' : post_draws['log_sigma2'],
-    'logit_rho' : post_draws['logit_rho']
+    'sigma2' : np.exp(post_draws['log_sigma2']),
+    'rho' : 1.0 / (1.0 + np.exp(-post_draws['logit_rho']))
     }
 # %% plot small effect recovery
 

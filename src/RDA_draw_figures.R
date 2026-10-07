@@ -8,7 +8,7 @@ library(ggpubr)
 shp_fp <- file.path(getwd(), "..", "output", "RDA", "us_mainland_data.shp")
 shp <- st_read(shp_fp)
 shp <- st_zm(shp, drop = TRUE, what = "ZM")
-output_fp <- file.path(getwd(), "..", "output", "RDA", "joint_network_v8")
+output_fp <- file.path(getwd(), "..", "output", "RDA", "joint_network_v9")
 diff_probs <- fread(file.path(output_fp, "diff_probs.csv"))
 # number of disparities
 npe_disp <- with(diff_probs, (approx_diff_prob >= cutoff_prob))
@@ -150,7 +150,7 @@ colnames(beta_df) <- c("Variable", "Posterior Mean", "95% Credible Interval")
 beta_caption = paste0("Standardized regression coefficient estimates ",
                       "from a Bayesian spatial regression model predicting 2014 US county-level ",
                       "tracheal, bronchus, and lung cancer mortality rates. ",
-                      "Posterior samples were generated via a neural posterior estimator, and ",
+                      "Estimates were obtained as the posterior mean of samples generated via a neural posterior estimation network, and ",
                       "95\\% credible intervals were derived from the 2.5\\% and 97.5\\% ",
                       "posterior quantiles for each health risk factor.")
 print(xtable::xtable(beta_df, caption = beta_caption,
@@ -267,3 +267,4 @@ print(xtable::xtable(disparity_table, caption = caption,
       type = "latex", include.rownames = FALSE, booktabs = TRUE, escape = FALSE,
       tabular.environment = "longtable", floating = FALSE,
       file.path(output_fp, "full_disparity_table.tex"), sanitize.colnames.function = identity)
+

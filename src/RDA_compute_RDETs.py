@@ -24,13 +24,13 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from src import disparities_helpers as disp
 from libpysal.weights import Rook
-
+import time
 
 shp_fp = "data/cb_2014_us_county_500k/cb_2014_us_county_500k.shp"
 data_fp = "output/RDA/data_cleaned.csv"
 model_name = "US_lungcancer"
-output_dir = "output/RDA/joint_network_v8/"
-net_fp = Path("checkpoints") / (model_name + "_net_v8.keras")
+output_dir = "output/RDA/joint_network_v9/"
+net_fp = Path("checkpoints") / (model_name + "_net_v9.keras")
 RDET_fp = output_dir + "RDET_df.csv"
 rng = np.random.default_rng(seed = 1130)
 
@@ -75,6 +75,8 @@ data = {"y": np.reshape(y_scaled, (1, n, 1))}
 # test computation time
 #data = {"y": np.reshape(y_scaled, (1, n, 1)) + rng.standard_normal((10, n, 1))}
 
+# pre-computed matrix product
+PtX = P.T @ X_scaled
 
 # %% load QR decomposition
 
@@ -115,8 +117,8 @@ RDET_df = pd.DataFrame({
     "higher_gamma_mean_county" : df['higher_gamma_mean_county'],
     "approx_diff_prob" : df['approx_diff_prob'],
     "delta" : np.repeat(delta, k),
-    "reduction_factor": np.repeat(-1, k),
-    "RDET_percent" : np.repeat(-1, k)
+    "reduction_factor": np.repeat(-1.0, k),
+    "RDET_percent" : np.repeat(-1.0, k)
 })
 RDET_df = RDET_df.reset_index()
 
@@ -149,7 +151,8 @@ def compute_rf(new_y, f, subset_indx, n_samples, batch_size, optim_e, cutoff_pro
         Lambda = Lambda,
         P = P,
         rng = rng,
-        subset_indx = subset_indx)
+        subset_indx = subset_indx,
+        PtX = PtX)
     phi = gamma / np.sqrt(sigma2 * rho)
     d = phi[:,:,0] - phi[:,:,1]
     stds = np.std(d, axis = 1, keepdims = True)
@@ -165,10 +168,15 @@ def compute_rf(new_y, f, subset_indx, n_samples, batch_size, optim_e, cutoff_pro
 
 # %% compute RDETs
 
+total_datasets_evaluated = 0
+loop_start = time.time()
+
 for i in range(k):
     print(f"Evaluating RDET for disparity {i + 1}/{k}")
+    iter_start = time.time()
+
     pair_counties = df.iloc[i][['county1', 'county2']].values.astype(int)
-    target_county = df.iloc[i]["higher_gamma_mean_county"]    
+    target_county = df.iloc[i]["higher_gamma_mean_county"]
     r_indx = data_shp.index[data_shp['County_FIPS'] == target_county].tolist()[0]
     subset_indx = data_shp.index[data_shp['County_FIPS'].isin(pair_counties)].tolist()
     # check reduction factors in batches (0.9-0.995 first)
@@ -177,17 +185,28 @@ for i in range(k):
     while rf is None:
         lower_end = 1.0 - batch_counter * step_size * steps
         upper_end = 1.0 - step_size - (batch_counter - 1) * step_size * steps
-        f = np.linspace(lower_end, upper_end, num = steps)
-        new_y = np.repeat(np.array(y)[np.newaxis,...], repeats = steps, axis = 0)
-        new_y[:,r_indx,:] *= f[:,np.newaxis]
-        new_y_scaled = (new_y - np.mean(y_np, axis = 0)) / (np.std(y_np, axis = 0))
+        f = np.linspace(lower_end, upper_end, num=steps)
+        new_y = np.repeat(np.array(y)[np.newaxis, ...], repeats=steps, axis=0)
+        new_y[:, r_indx, :] *= f[:, np.newaxis]
+        new_y_scaled = (new_y - np.mean(y_np, axis=0)) / (np.std(y_np, axis=0))
         rf = compute_rf(new_y_scaled, f, subset_indx,
                         n_samples, batch_size, optim_e, cutoff_prob)
+        total_datasets_evaluated += steps
         batch_counter += 1
+
     RDET = 100 * (1.0 - rf)
     RDET_df.loc[i, 'reduction_factor'] = rf
     RDET_df.loc[i, 'RDET_percent'] = RDET
-    RDET_df.to_csv(RDET_fp, index = False)
+    RDET_df.to_csv(RDET_fp, index=False)
+
+    iter_elapsed = time.time() - iter_start
+    total_elapsed = time.time() - loop_start
+    print(f"  disparity {i + 1}/{k} done in {iter_elapsed:.1f}s "
+          f"| total elapsed: {total_elapsed:.1f}s "
+          f"| counterfactual datasets evaluated so far: {total_datasets_evaluated}")
+
+print(f"\nDone: {k} disparities, {total_datasets_evaluated} counterfactual datasets "
+      f"evaluated in {time.time() - loop_start:.1f}s")
 
 
 # %%
